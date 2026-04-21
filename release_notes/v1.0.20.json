@@ -1,0 +1,11 @@
+{
+  "summary": "Stability update for startup, local testing, orders, and app updates.",
+  "release_notes": [
+    "Stopped duplicate order rows from appearing after order submission.",
+    "Fixed startup on Windows so the app uses the correct local Python environment more reliably.",
+    "Added a local dev terminal mode so server logs stay visible while testing.",
+    "Fixed missing timezone data dependency that could break local startup.",
+    "Prevented the Windows app from opening a second desktop window if it is already running.",
+    "Improved the updater experience with release notes, clearer status messages, and a download progress bar."
+  ]
+}

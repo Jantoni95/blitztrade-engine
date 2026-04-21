@@ -1,0 +1,13 @@
+{
+  "summary": "Auto-Exit (Off-Hours) with configurable order type, Analysis Lab fixes, WebView2 cache-busting.",
+  "release_notes": [
+    "New Auto-Exit (Off-Hours) feature — a software-based watchdog that monitors live bid/ask and fires an exit when your offset from fill price is hit, covering the gap where broker stop-loss orders don't work outside regular trading hours.",
+    "Configurable exit order type: choose between MKT (market) or LMT (limit with adjustable offset from bid/ask), matching the same pattern as close-position settings.",
+    "Disabled by default in Settings → Trading. When enabled, the Auto-Exit row only appears on the trading terminal when the market is closed and you have an open position.",
+    "Configurable offset from fill price, cancel-open-orders toggle, and ARM/DISARM per position with pulsing visual indicator.",
+    "Also accessible from the quick-settings gear popup on entry buttons for fast configuration.",
+    "Clear warnings throughout the UI that this is a software stop requiring BlitzTrade to be running — not a broker-held order.",
+    "Analysis Lab: fixed Run Query button not responding in pywebview — rewired via document-level event delegation.",
+    "Added no-cache headers and cache-busting query params to prevent WebView2/Edge from serving stale analytics pages."
+  ]
+}

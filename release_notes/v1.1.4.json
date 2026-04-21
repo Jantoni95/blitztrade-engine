@@ -1,0 +1,18 @@
+{
+  "summary": "Trading terminal price follows chart prints only, fixed packaged app crash, and hardened auto-update system.",
+  "release_notes": [
+    "Trading Terminal current price is now chart-driven only to prevent back-and-forth jumps.",
+    "Removed non-TBT market data price updates from TP live price path.",
+    "Removed snapshot field-31 TP price seeding; TP still initializes from chart state and keeps T&S prints unchanged.",
+    "Alerts now only trigger for tickers visible in your table, respecting the 'Show' row limit and current sort order.",
+    "Fixed critical packaged app (BlitzTrade.exe) crash due to missing yfinance dependency bundling.",
+    "Made yfinance import optional — app runs without it using urllib fallback for market data.",
+    "Added comprehensive startup logging to launcher.py for debugging desktop app issues.",
+    "Hardened auto-update system with SHA256 integrity verification and atomic file replacement.",
+    "Auto-updates now verify downloaded binary hash before installation, rejecting corrupted files.",
+    "Implemented automatic rollback: if update fails, previous version is restored from backup.",
+    "Added exponential backoff retry logic for resilient downloads in poor network conditions.",
+    "Fixed Windows batch script race conditions with explicit error checking and validation.",
+    "Prevents version downgrades via min_version constraint in update manifest."
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "summary": "Faster trading, panel dock, unified panel management, Company Info panel, and reliability fixes.",
+  "release_notes": [
+    "Order placement is now near-instant — the server returns in ~150ms and all fill/status updates stream via WebSocket in real time.",
+    "TP/SL bracket orders are only sent after the entry order fills — prevents TWS from rejecting brackets as accidental shorts/longs when using limit orders.",
+    "Cancelled and ApiCancelled orders now appear correctly in the orders table after a server restart.",
+    "Dock trading terminal to panels — new '📋 Panels' option overlays the terminal centered on top of the panel columns. Auto-undocks when panel count drops to a single column.",
+    "Docking transitions are seamless — no flash or jump when switching between chart and panel dock modes.",
+    "All panels (Alert Feed, Scanners, Company Info, News) are managed from Settings → Panels with drag-to-reorder and remove.",
+    "New Company Info panel in the left column — shows KPIs, financials, and AI summary for the active chart ticker. News and Company Info panels can be linked to any chart slot.",
+    "Company Info now uses IB fundamental data instead of Yahoo — eliminates the Yahoo/curl_cffi dependency entirely.",
+    "Panel changes in Settings are previewed live and reverted on cancel.",
+    "Add Panel dropdown opens above the button, hides already-added panels, and caps at 8 options.",
+    "Reset to Default button added in each settings section.",
+    "All inline scanner filters now support min–max ranges (Chg%, Gap%, RVol, Float).",
+    "Day P&L and balance now use your account's base currency instead of hardcoded USD.",
+    "High of Day respects the chart timezone toggle (ET/LCL).",
+    "Fixed Level 2 depth freezing — server detects stale TWS subscriptions and auto-re-subscribes. Stale depth snapshots are skipped to prevent one-tick flash of old data.",
+    "Fixed position display flickering after fills — optimistically-zeroed positions are protected from stale API data for 5 seconds.",
+    "Release Notes moved to a standalone page accessible from the account dropdown.",
+    "Help page expanded with column explanations, filter docs, badges reference, and Chg% vs Gap% breakdown.",
+    "Disconnected overlay now displays above the trading terminal and all modals. Help and Release Notes are hidden when offline.",
+    "Share card auto-refreshes when new trades arrive while the modal is open.",
+    "Panel columns show a visible scrollbar and the drag handle no longer pushes charts off screen."
+  ]
+}

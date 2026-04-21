@@ -1,0 +1,8 @@
+{
+  "summary": "Auto-update reliability improvements.",
+  "release_notes": [
+    "Fixed an issue where the auto-update would download successfully but fail to replace the old app on Windows, leaving the update stuck and the app relaunching as the old version.",
+    "Fixed a duplicate update progress screen that could appear on top of itself during an update install.",
+    "The update screen now shows the target version number while the download is in progress."
+  ]
+}

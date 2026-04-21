@@ -1,0 +1,12 @@
+{
+  "summary": "Open-source engine, SL drag fix, T&S resize fix, and whatIf order filtering.",
+  "release_notes": [
+    "Published blitztrade-engine: the backend and build system are now open-source for full transparency.",
+    "Stop-loss drag-to-modify now correctly updates auxPrice instead of lmtPrice — SL orders are actually modified on TWS.",
+    "Time & Sales column no longer overflows the window when resized smaller with the drag handle.",
+    "WhatIf tradability-check orders are now filtered from the WS broadcast — no more fake orders in the orders table.",
+    "Column toggle dropdown no longer closes immediately after clicking a checkbox.",
+    "Cancel buttons moved to the Action column and always visible.",
+    "README updated with correct project structure and test file names."
+  ]
+}

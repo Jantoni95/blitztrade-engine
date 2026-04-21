@@ -1,0 +1,14 @@
+{
+  "summary": "Safer auto-exits, clearer charts, and faster stall recovery for live trading.",
+  "release_notes": [
+    "Bridge now has an external watchdog: detects freezes within ~9s and auto-restarts without touching the UI window.",
+    "When the bridge restarts, the app reconnects gracefully (disconnected overlay, no page reload, no state loss).",
+    "L2 depth subscription bugs fixed: subscriptions now survive reconnects correctly and recover silently when dropped.",
+    "Scanner poll loop no longer blocks on slow requests — each table updates independently as data arrives.",
+    "Auto-Exit now supports multiple active entries per symbol, with separate chart lines and order badges for each one.",
+    "Auto-Exit trigger direction is based on offset sign: negative triggers on price down to target, positive on price up.",
+    "Chart volume logic rebuilt for consistency with IB data sources, improving live vs historical volume alignment.",
+    "L2 and Time & Sales availability warnings now appear in panel headers. Panel resize jitter at edges fixed.",
+    "Windows login sessions use DPAPI-protected refresh token storage with automatic migration."
+  ]
+}

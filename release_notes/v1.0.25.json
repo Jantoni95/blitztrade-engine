@@ -1,0 +1,16 @@
+{
+  "summary": "Login fix, Help page rewrite, L2 fixes, auto-cancel toggle.",
+  "release_notes": [
+    "Fixed login — the email OTP sign-in screen now appears correctly on startup.",
+    "Level 2 depth rows now show the normal background color by default instead of black.",
+    "Custom L2 colors you've set in Settings are preserved and unaffected.",
+    "Fixed stale ask prices lingering in the L2 book — depth data is now sorted, capped, and cross-filtered.",
+    "Help page rewritten for clarity — simplified login section, removed technical jargon.",
+    "Added documentation for Reverse Split ($), SHELF S-3, and News Dot badges.",
+    "New Help sections: News, Company Info, and Auto-Update.",
+    "Settings tab list now includes Release Notes.",
+    "Fixed site URL to blitztrade.io throughout.",
+    "New 'Auto-cancel orders on close' toggle in Settings → Trading and on Close 50%/100% gear menus.",
+    "When disabled, Close 50% and Close 100% place the closing order without canceling existing orders for the ticker."
+  ]
+}

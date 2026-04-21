@@ -1,0 +1,8 @@
+{
+  "summary": "IB Gateway no longer auto-starts on first launch — you control when to open or install it, with an optional auto-start toggle.",
+  "release_notes": [
+    "IB Gateway no longer launches automatically on first startup. The overlay now shows an 'Open IB Gateway' or 'Install IB Gateway' button instead.",
+    "Added an 'Auto-start IB Gateway on launch' checkbox in both the disconnected overlay and Settings → Connection, so you can opt in to automatic startup.",
+    "Your auto-start preference is saved and remembered across sessions."
+  ]
+}

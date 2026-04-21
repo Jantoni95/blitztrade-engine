@@ -1,0 +1,15 @@
+{
+  "summary": "Email OTP login and subscription-based feature gating.",
+  "release_notes": [
+    "Added passwordless email login via AWS Cognito — enter your email, receive a 6-digit OTP, sign in.",
+    "Login screen gates the app until authenticated; session persists for 30 days with automatic token refresh.",
+    "User email shown in top bar with click-to-logout.",
+    "Subscription tier feature gating: Trade button hidden for base (scanner) tier, Analytics hidden for scanner and scanner-trading tiers.",
+    "Analytics page shows lock screen if accessed without full-access subscription.",
+    "OTP input supports paste, auto-advance between digits, and auto-submit when all 6 digits entered.",
+    "Removed Halted filter from screener filter bars (halted scanner tab and HLT badges unchanged).",
+    "Fixed 64-bit Windows title bar icon — ctypes argtypes/restype now declared correctly for pointer-sized handles.",
+    "Build script auto-fetches Cognito Pool ID and Client ID from CloudFormation at build time.",
+    "Help page updated with Login section documenting the sign-in flow."
+  ]
+}

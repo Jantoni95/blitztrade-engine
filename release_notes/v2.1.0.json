@@ -1,0 +1,10 @@
+{
+  "summary": "Subscription simplification and analytics access update, plus trading popup and connectivity UX improvements.",
+  "release_notes": [
+    "Simplified entitlement handling so app access is based on scanner+terminal; scanner+terminal+analytics now behaves the same in-app.",
+    "Changed Analytics button behavior to open https://blitztrade.io/analytics in the user’s default browser from desktop app builds.",
+    "Added a pywebview API external-link bridge to reliably open external URLs via system browser.",
+    "Improved trading popup behavior and responsive titlebar layout so controls remain usable at smaller popup sizes.",
+    "Added TraderWorkstation connection mode guidance and improved connection-mode UX in settings and disconnected-state messaging."
+  ]
+}

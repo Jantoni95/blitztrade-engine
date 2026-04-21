@@ -1,0 +1,8 @@
+{
+  "summary": "Reliable auto-update in packaged builds, local update testing without a full build.",
+  "release_notes": [
+    "Fixed auto-update never initiating a download in the installed exe — the previous sys.frozen detection is not set by Nuitka, replaced with a build-time IS_PACKAGED flag that is stamped True only in compiled builds.",
+    "Build pipeline now stamps IS_PACKAGED into a temporary copy of launcher.py so the source file is never mutated by a local build run.",
+    "Set BLITZTRADE_IS_PACKAGED=1 in your shell to enable the full update check → download → replace flow when running from source, without needing a full Nuitka compile."
+  ]
+}

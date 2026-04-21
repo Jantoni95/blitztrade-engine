@@ -1,0 +1,15 @@
+{
+  "summary": "Analytics overhaul: enhanced coaching recap, new Analysis Lab, calendar readability fix, and font size bump across the board.",
+  "release_notes": [
+    "Coaching Recap is now the flagship analytics feature — hero header with overall composite score, color-coded score bars for each pillar, and inline actionable steps on every detected issue.",
+    "4 new coaching detectors: extended losing streaks, negative risk/reward ratio, worst-day-outsizes-best-day blowup risk, and red-day trade churn (more trades on losing days).",
+    "New Habit Tracker & Trends panel shows 5-day performance trend, win streak pattern analysis, and green-day trade count insights.",
+    "Active streak alert banner appears during 3+ win or loss streaks with context-specific advice.",
+    "Expanded strength detection to 8 signals including R:R quality, low cost drag, minimal revenge trading, and clean streak discipline.",
+    "New Analysis Lab tab — a Power BI-style self-service query builder with 12 one-click presets (P&L by hour, win rate by weekday, top winners/losers, revenge trades, first trade of day, and more).",
+    "Lab supports custom queries: group by symbol/side/hour/DOW/date/hold-time/size/P&L-range, 9 measures, symbol/side/outcome filters, bar chart or table view.",
+    "Calendar heat map cells now have significantly stronger tinted backgrounds, brighter text, and colored P&L glow for much better readability.",
+    "Base font bumped from 13px to 14px; all small text (10–11px) raised to 12–13px minimum for improved readability across the dashboard.",
+    "Video briefing and pitch deck title cards now perfectly aligned — briefing panel toggleable with B key for use during recording."
+  ]
+}

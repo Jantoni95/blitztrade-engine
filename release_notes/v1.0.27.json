@@ -1,0 +1,21 @@
+{
+  "summary": "Subscription enforcement, TWS disconnect detection, custom sign-out popover, connection reliability.",
+  "release_notes": [
+    "Fixed critical bug where removing all Cognito groups from a user granted full access instead of locking them out.",
+    "Users with no active subscription are now blocked at login with a clear error message.",
+    "Added plan expiry support — a custom:plan_expiry attribute on the Cognito user controls when the subscription ends.",
+    "Expired subscriptions are enforced on login, token refresh, and periodically during the session.",
+    "Server-side subscription validation on both /auth/verify and /auth/refresh — blocks login and token refresh with a 403 if no groups or plan expired.",
+    "Plan downgrade toasts — if trading or analytics access is removed mid-session, a warning toast notifies the user.",
+    "Heartbeat interval reduced from 50 minutes to 15 minutes for faster detection of plan changes.",
+    "Heartbeat is non-blocking — token refresh runs in the background without freezing the UI.",
+    "Analytics page now re-checks access every 15 minutes and redirects to the main page if the subscription was revoked.",
+    "Analytics page no longer grants access to users with empty groups.",
+    "OTP sender email falls back to AdminEmail parameter when no custom domain is configured.",
+    "Login errors (user not found, account not activated) now show a toast notification in addition to the inline message.",
+    "Custom sign-out popover replaces the browser confirm dialog — shows email and a styled sign-out button.",
+    "TWS disconnect is now detected during polling — shows the disconnected overlay and auto-reconnects when TWS comes back.",
+    "Disconnected overlay no longer covers the top bar — settings button remains clickable.",
+    "Removed the 3-minute reconnect timeout — app now waits indefinitely for TWS to connect."
+  ]
+}

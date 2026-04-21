@@ -1,0 +1,10 @@
+{
+  "summary": "Reliability fixes for market data, cleaner chart visuals, and auto-update improvements.",
+  "release_notes": [
+    "Float and country data now loads reliably on all systems — added a built-in fallback when the primary data source is unavailable.",
+    "Chart indicator lines (EMA 9/20/200, VWAP, MACD) no longer show labels on the price axis, keeping the chart cleaner.",
+    "Screener table columns and skeleton loading rows now always match your visible column layout.",
+    "Auto-update now works correctly — the app will detect and install new versions on startup.",
+    "Fixed an issue where the Analytics page could appear locked even without a subscription requirement."
+  ]
+}

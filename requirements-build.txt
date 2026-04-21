@@ -1,0 +1,11 @@
+-r requirements.txt
+
+# Build tooling
+nuitka
+ordered-set
+zstandard
+
+# Windows packaging/runtime support explicitly included by build_app.py
+pythonnet
+cffi
+pycparser

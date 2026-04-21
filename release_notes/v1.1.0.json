@@ -1,0 +1,11 @@
+{
+  "summary": "Crash recovery, dock fixes, faster news, cleaner top bar.",
+  "release_notes": [
+    "App now automatically recovers from background crashes instead of silently stopping.",
+    "Fixed docked trading terminal undocking when closed and reopened.",
+    "Fixed docked trading terminal undocking after re-login.",
+    "News now loads instantly on startup instead of showing a loading skeleton.",
+    "Settings and Help moved into the account dropdown for a cleaner top bar.",
+    "Settings help now shows both TWS ports: 7496 for live, 7497 for paper trading."
+  ]
+}

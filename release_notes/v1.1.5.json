@@ -1,0 +1,10 @@
+{
+  "summary": "Performance analytics coaching refined with box-based guidance, improved upload responsiveness, and release stability updates.",
+  "release_notes": [
+    "Removed the step-by-step coaching wizard and restored a cleaner box-based coaching recap with separate panels for strengths, issues, and next-session plan.",
+    "Coaching now surfaces clearer good-vs-bad diagnostics and converts top weaknesses into direct, actionable next steps.",
+    "Improved analytics upload interaction responsiveness by reducing temporary input blocking windows and removing friction in click handling.",
+    "Updated performance analytics UI and behavior for more readable insights and smoother day-to-day review workflow.",
+    "General reliability and packaging hardening updates carried forward for desktop release consistency."
+  ]
+}

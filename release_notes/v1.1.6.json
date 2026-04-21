@@ -1,0 +1,9 @@
+{
+  "summary": "Instant loading skeletons on ticker switch, smoother analytics open, and release notes page stability fix.",
+  "release_notes": [
+    "Switching tickers now immediately clears stale news and company info with animated loading skeletons instead of showing old data while the new fetch is in flight.",
+    "Analytics dashboard defers heavy IndexedDB load to after the first paint, so the page chrome appears instantly before data is restored.",
+    "Fixed the release notes page returning an error when navigated to directly by URL.",
+    "General UI responsiveness improvements for panel transitions."
+  ]
+}

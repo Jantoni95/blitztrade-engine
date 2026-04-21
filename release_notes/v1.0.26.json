@@ -1,0 +1,12 @@
+{
+  "summary": "Full-screen disconnect overlay, news timeout, fully automatic updates, Cognito auth fix.",
+  "release_notes": [
+    "The 'Not connected' overlay now covers the entire screen (including the trading window) so it's impossible to miss. Settings remains accessible above it.",
+    "Added a 10-second timeout to news fetches — news list, article, and company info requests no longer hang indefinitely.",
+    "Auto-update is now fully automatic — updates download and install on startup with no user action required.",
+    "A slim progress bar at the top shows download progress, with an expandable 'What's new' section showing release notes.",
+    "Fixed expired download URLs — the app now fetches a fresh S3 URL right before downloading instead of reusing the one from startup.",
+    "Launcher auto-fetches Cognito config from CloudFormation in dev mode when not stamped at build time.",
+    "Fixed passwordless email login — added the missing Cognito custom auth Lambda triggers (OTP generation and verification)."
+  ]
+}

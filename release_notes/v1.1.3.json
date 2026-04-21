@@ -1,0 +1,7 @@
+{
+  "summary": "Analyst rating now shown in Company Info, and order status P&L fixed.",
+  "release_notes": [
+    "Company Info now always supplements IB fundamental data with yfinance — fields IB does not provide (rating, analyst target, analyst count, insider %, institution %) are now consistently populated.",
+    "Fixed NameError in real-time order status updates — realized P&L is now tracked as a module-level variable and correctly included in live order status broadcasts."
+  ]
+}

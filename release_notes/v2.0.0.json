@@ -1,0 +1,10 @@
+{
+  "summary": "Major stability and release upgrade with installer distribution.",
+  "release_notes": [
+    "Added Windows installer packaging (BlitzTradeInstaller.exe) to release pipeline while keeping auto-update on app binary payloads.",
+    "Introduced smarter IB Gateway setup and launch flow with clearer disconnected-state guidance and better startup behavior.",
+    "Improved market-data reliability with real-data history retries, scanner subscription throttling, and tighter depth subscription sync for active chart tickers.",
+    "Hardened update/download release metadata and endpoint handling for app vs installer artifacts.",
+    "Polished analytics and terminal UX details, including ET-based day grouping and improved empty states."
+  ]
+}

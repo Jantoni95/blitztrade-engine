@@ -1,0 +1,11 @@
+{
+  "summary": "Trading popup refinements and cleaner top-bar interaction polish.",
+  "release_notes": [
+    "Updated Share Card stat label from AVG WIN /SH to AVG WIN /SHARE.",
+    "Aligned trading popup section header heights across Positions, Time & Sales, Orders, and Hotkeys for consistent layout.",
+    "Reduced Positions table display minimum height to tighten vertical spacing.",
+    "Removed market session indicator from the top header clock so it shows time + ET only.",
+    "Refined Trade button hover behavior: bolt now switches to steady light-on mode while hover is active and flash animation pauses.",
+    "Cleaned Trade button hover background by removing the external green halo so hover effect stays inside the button."
+  ]
+}

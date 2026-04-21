@@ -1,0 +1,8 @@
+{
+  "summary": "Code quality pass and build improvements.",
+  "release_notes": [
+    "Reformatted serve.py, build_app.py, launcher.py, and download_handler.py for consistent code style.",
+    "Build script now auto-discovers release_notes/*.json files instead of hardcoding the list.",
+    "Download handler returns proper JSON when client is already on the latest version."
+  ]
+}

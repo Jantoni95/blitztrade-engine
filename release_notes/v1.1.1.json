@@ -1,0 +1,7 @@
+{
+  "summary": "Auto-update fix.",
+  "release_notes": [
+    "Auto-update now works correctly — previous versions were unable to download updates.",
+    "Updates only trigger after login instead of on app startup."
+  ]
+}

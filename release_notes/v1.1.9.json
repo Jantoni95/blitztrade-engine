@@ -1,0 +1,12 @@
+{
+  "summary": "Trading terminal reliability fixes, desktop share-card save support, and Windows onefile packaging compatibility updates.",
+  "release_notes": [
+    "Entry orders can now submit native bracket TP/SL children in one request flow, with TP/SL levels drawn immediately and the entry line deferred until the real fill price is known.",
+    "Improved order reconciliation so orders cancelled directly in TWS stop lingering as Submitted in the app, and single-order cancel actions no longer double-report success while cancellation is still pending.",
+    "Close, half-close, and flatten flows now wait for IB to acknowledge TP or other active-order cancellation before sending the exit order, preventing accidental short-sale rejections.",
+    "Orders Today no longer falsely shows No orders during account bootstrap, and the trading popup now resolves account context before its first orders and balance refresh.",
+    "Level 2 depth handling now filters transient crossed books more aggressively and preserves the last valid book when IB briefly emits an empty depth snapshot, reducing flicker.",
+    "Desktop share cards can now be saved through the native pywebview save dialog instead of relying on browser-only download behavior.",
+    "Packaged build stamping remains syntax-validated before compile, and Windows onefile builds now pass Nuitka an absolute runtime temp directory instead of an incompatible variable token."
+  ]
+}
