@@ -1,0 +1,8 @@
+{
+  "summary": "Hardened download infrastructure and credential injection.",
+  "release_notes": [
+    "Download and update endpoints now require authentication and verify subscription access.",
+    "Endpoints use managed throttling to prevent abuse.",
+    "Sensitive configuration values are injected at build time instead of being hardcoded in source."
+  ]
+}

@@ -64,10 +64,10 @@ APP_VERSION = "2.0.0"
 # Set env var BLITZTRADE_IS_PACKAGED=1 locally to test the auto-update flow without a full build.
 IS_PACKAGED = os.environ.get("BLITZTRADE_IS_PACKAGED") == "1"
 
-# Update endpoint (Lambda function URL — set after first deploy)
+# Update endpoint (API Gateway — injected at build time)
 UPDATE_URL = os.environ.get(
     "BLITZ_UPDATE_URL",
-    "https://tvgso5uqf55z5ub3a4nxj5ufee0ccgcb.lambda-url.us-east-1.on.aws",
+    "",
 )
 
 # Optional, isolated IB Gateway setup helper (user-consented only)
@@ -116,6 +116,61 @@ def _fetch_cognito_from_stack():
             print(f"  Auto-fetched Cognito: pool={COGNITO_USER_POOL_ID}")
     except Exception:
         pass  # AWS CLI not available or not configured — skip silently
+
+
+def _get_access_token():
+    """Try to obtain a Cognito access token using a stored refresh token.
+
+    Returns the access token string, or "" if unavailable.
+    """
+    if not COGNITO_CLIENT_ID or not COGNITO_REGION:
+        return ""
+    # Try to load stored refresh token (Windows DPAPI or plaintext)
+    auth_dir = os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.environ.get("HOME") or str(Path.home()),
+        "BlitzTrade",
+    )
+    refresh_file = os.path.join(auth_dir, "auth_refresh_token.bin")
+    refresh_token = ""
+    if os.path.exists(refresh_file):
+        try:
+            raw = open(refresh_file, "rb").read()
+            if platform.system() == "Windows":
+                # DPAPI decrypt
+                import ctypes, ctypes.wintypes
+                class _BLOB(ctypes.Structure):
+                    _fields_ = [("cbData", ctypes.wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+                inp = _BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw, len(raw)), ctypes.POINTER(ctypes.c_char)))
+                out = _BLOB()
+                if ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(inp), None, None, None, None, 0, ctypes.byref(out)):
+                    refresh_token = ctypes.string_at(out.pbData, out.cbData).decode("utf-8", errors="ignore")
+                    ctypes.windll.kernel32.LocalFree(out.pbData)
+            else:
+                refresh_token = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+    if not refresh_token:
+        return ""
+    # Call Cognito InitiateAuth to refresh
+    try:
+        url = f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/"
+        payload = json.dumps({
+            "AuthFlow": "REFRESH_TOKEN_AUTH",
+            "ClientId": COGNITO_CLIENT_ID,
+            "AuthParameters": {"REFRESH_TOKEN": refresh_token},
+        }).encode()
+        req = urllib.request.Request(
+            url, data=payload, method="POST",
+            headers={
+                "Content-Type": "application/x-amz-json-1.1",
+                "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return data.get("AuthenticationResult", {}).get("AccessToken", "")
+    except Exception:
+        return ""
 
 
 # ── Paths ────────────────────────────────────────────────────
@@ -788,30 +843,6 @@ def _auto_launch_ibgw_if_needed():
     if platform.system() != "Windows":
         return
     try:
-        # Respect user's connection mode preference — skip if TWS is selected
-        _settings_file = Path(__file__).parent / "settings.json"
-        try:
-            _settings = (
-                json.loads(_settings_file.read_text())
-                if _settings_file.exists()
-                else {}
-            )
-            _scr3_raw = _settings.get("scr3", "")
-            _scr3 = (
-                json.loads(_scr3_raw)
-                if isinstance(_scr3_raw, str) and _scr3_raw
-                else _scr3_raw if isinstance(_scr3_raw, dict) else {}
-            )
-            _conn_mode = str(_scr3.get("connMode", "")).strip().lower()
-        except Exception:
-            _conn_mode = ""
-        if _conn_mode == "tws":
-            _log("auto_launch_ibgw: skipped (connection mode is tws)")
-            return
-        if not _scr3.get("autoStartGW", False):
-            _log("auto_launch_ibgw: skipped (autoStartGW is disabled)")
-            return
-
         installed, running = _detect_ibgw_state()
         if running:
             _log("auto_launch_ibgw: already running")
@@ -857,7 +888,7 @@ def _get_ibgw_status():
 
 
 def _check_for_updates():
-    """Query the Lambda endpoint for the latest version metadata."""
+    """Query the Lambda endpoint for the latest version and auto-install."""
     global _update_info
     if not UPDATE_URL:
         _log("update_check_skipped: UPDATE_URL not set")
@@ -868,9 +899,11 @@ def _check_for_updates():
             + f"/update?v={APP_VERSION}&platform={_platform_key()}"
         )
         _log(f"update_check_start: url={url}")
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "BlitzTrade/" + APP_VERSION}
-        )
+        headers = {"User-Agent": "BlitzTrade/" + APP_VERSION}
+        token = _get_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
         _log(
@@ -1134,9 +1167,11 @@ def _fresh_download_url():
             UPDATE_URL.rstrip("/")
             + f"/update?v={APP_VERSION}&platform={_platform_key()}"
         )
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "BlitzTrade/" + APP_VERSION}
-        )
+        headers = {"User-Agent": "BlitzTrade/" + APP_VERSION}
+        token = _get_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
         if data.get("update_available") and data.get("download_url"):
@@ -1248,41 +1283,29 @@ class BlitzAPI:
         return _get_update_status()
 
     def check_for_updates(self):
-        """Check and install update when explicitly triggered by logged-in UI flow."""
+        """Called by the JS frontend after the user logs in.
+        Re-checks for an update (in case the metadata fetch hasn't finished yet)
+        and immediately triggers auto-install if one is available."""
 
         def _run():
-            if not _is_packaged_runtime():
-                _log("check_for_updates_skipped_not_packaged")
-                return
-            if not UPDATE_URL:
-                _log("check_for_updates_skipped_no_update_url")
-                return
-
-            st = _get_update_status()
-            if st.get("state") in {
-                "checking",
-                "downloading",
-                "installing",
-                "verifying",
-                "restarting",
-            }:
-                return
-
-            _set_update_status(
-                state="checking",
-                progress=0,
-                message="Checking for updates...",
-                error="",
-            )
-            _check_for_updates()
-            if _update_info and _update_info.get("url"):
-                _log("update_install_triggered_logged_in")
-                _download_and_replace(_update_info)
-            else:
-                _set_update_status(state="idle", progress=0, message="", error="")
+            _check_for_updates()  # refresh metadata
+            if _update_info and _update_info.get("url") and _is_packaged_runtime():
+                status = _get_update_status()
+                if status["state"] not in {"downloading", "installing", "restarting"}:
+                    _log("update_install_triggered_post_login")
+                    _set_update_status(
+                        state="downloading",
+                        progress=0,
+                        message=(
+                            f"Downloading v{_update_info['version']}..."
+                            if _update_info.get("version")
+                            else "Downloading update..."
+                        ),
+                        error="",
+                    )
+                    _download_and_replace(_update_info)
 
         threading.Thread(target=_run, daemon=True).start()
-        return True
 
     def install_update(self):
         """Download and install the pending update, then restart."""
@@ -1499,73 +1522,6 @@ def _start_server(port, tws_port=None):
         print(f"[BlitzTrade] Max restarts ({_SERVER_MAX_RESTARTS}) reached — giving up")
 
 
-# ── External Bridge Watchdog ─────────────────────────────────
-# Runs in its own daemon thread; polls /api/health to verify the bridge is alive.
-# If the bridge stops responding (event loop frozen / hung) it calls serve.force_restart()
-# which cleanly stops the aio loop — the _start_server restart loop then brings it back up
-# without touching the pywebview window.
-
-_WD_HEALTH_INTERVAL = 3  # seconds between polls
-_WD_HEALTH_TIMEOUT = 2  # HTTP timeout per poll — keep short so 3 failures = ~6s
-_WD_HEALTH_FAILURES = 3  # consecutive failures before restart
-_WD_RESTART_COOLDOWN = 90  # min seconds between watchdog-triggered restarts
-_wd_last_restart_time = 0.0
-
-
-def _bridge_watchdog_thread(port):
-    """Poll /api/health every N seconds; restart the bridge if it stops responding."""
-    global _wd_last_restart_time
-    url = f"http://127.0.0.1:{port}/api/health"
-    consecutive_failures = 0
-    # Give the bridge a generous grace period on first start before we start watching
-    time.sleep(30)
-    _log("bridge_watchdog_started")
-    while True:
-        time.sleep(_WD_HEALTH_INTERVAL)
-        try:
-            with urllib.request.urlopen(url, timeout=_WD_HEALTH_TIMEOUT) as resp:
-                data = json.loads(resp.read())
-            # Bridge is alive
-            if consecutive_failures:
-                _log(f"bridge_watchdog_recovered after {consecutive_failures} failures")
-            consecutive_failures = 0
-            # Check: WS clients present but ALL subscriptions silently dropped
-            ws = data.get("ws_clients", 0)
-            md = data.get("md_subs", 0)
-            depth = data.get("depth_subs", 0)
-            ib_ok = data.get("ib_connected", True)
-            uptime = data.get("uptime", 0)
-            if ws > 0 and md == 0 and depth == 0 and ib_ok and uptime > 60:
-                _log(
-                    f"bridge_watchdog: {ws} WS clients but 0 subscriptions "
-                    f"(uptime={uptime}s) — triggering restart"
-                )
-                _do_watchdog_restart()
-        except Exception as e:
-            consecutive_failures += 1
-            _log(f"bridge_watchdog_health_fail #{consecutive_failures}: {e}")
-            if consecutive_failures >= _WD_HEALTH_FAILURES:
-                _log("bridge_watchdog: bridge unresponsive — triggering restart")
-                _do_watchdog_restart()
-                consecutive_failures = 0
-
-
-def _do_watchdog_restart():
-    """Ask the bridge to restart cleanly, respecting a cooldown."""
-    global _wd_last_restart_time
-    now = time.time()
-    if now - _wd_last_restart_time < _WD_RESTART_COOLDOWN:
-        _log("bridge_watchdog: restart skipped (cooldown active)")
-        return
-    _wd_last_restart_time = now
-    try:
-        import serve as _serve
-
-        _serve.force_restart()
-    except Exception as e:
-        _log(f"bridge_watchdog_restart_error: {e}")
-
-
 # ── Main ─────────────────────────────────────────────────────
 
 
@@ -1607,6 +1563,10 @@ def main():
     threading.Thread(target=_auto_launch_ibgw_if_needed, daemon=True).start()
     _log("launcher_auto_ibgw_thread_started")
 
+    # Check for updates in background
+    threading.Thread(target=_check_for_updates, daemon=True).start()
+    _log("launcher_update_thread_started")
+
     # Start aiohttp server in a daemon thread
     server_thread = threading.Thread(
         target=_start_server, args=(port, tws_port), daemon=True
@@ -1623,12 +1583,6 @@ def main():
 
     print(f"[BlitzTrade] Server ready — opening window")
     _log("launcher_server_ready")
-
-    # External bridge watchdog — polls /api/health; restarts bridge if it hangs
-    threading.Thread(
-        target=_bridge_watchdog_thread, args=(port,), daemon=True, name="BridgeWatchdog"
-    ).start()
-    _log("launcher_bridge_watchdog_started")
 
     # Create native window
     api = BlitzAPI()

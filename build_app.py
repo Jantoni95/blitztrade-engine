@@ -259,6 +259,47 @@ def stamp_cognito(target_path):
     print(f"  Stamped Cognito: pool={pool_id}, client={client_id}")
 
 
+def stamp_download_url(target_path):
+    """Fetch the download API URL from the infra stack and write into the build copy."""
+    import re as _re
+
+    stack = "blitztrade-infra"
+    region = "us-east-1"
+    print(f"  Fetching download URL from {stack} stack...")
+    try:
+        raw = subprocess.check_output(
+            [
+                "aws", "cloudformation", "describe-stacks",
+                "--stack-name", stack,
+                "--region", region,
+                "--query", "Stacks[0].Outputs[?OutputKey=='DownloadUrl'].OutputValue",
+                "--output", "text",
+            ],
+            text=True,
+        ).strip()
+    except Exception as e:
+        print(f"  [!] Could not fetch stack outputs: {e}")
+        raw = os.environ.get("BLITZ_UPDATE_URL", "")
+        if raw:
+            print(f"  Using BLITZ_UPDATE_URL env var.")
+        else:
+            print(f"  Set BLITZ_UPDATE_URL env var for dev.")
+            return
+    if not raw:
+        print(f"  [!] DownloadUrl output is empty.")
+        return
+    with open(target_path, "r") as f:
+        content = f.read()
+    content = _re.sub(
+        r'(BLITZ_UPDATE_URL",\s*\n\s*)"[^"]*"',
+        f'\\1"{raw}"',
+        content,
+    )
+    with open(target_path, "w") as f:
+        f.write(content)
+    print(f"  Stamped download URL: {raw}")
+
+
 # ── Build ────────────────────────────────────────────────────
 
 
@@ -275,6 +316,7 @@ def build(version, onefile_windows=True, windows_console=False):
     try:
         stamp_version(version, _launcher_tmp)
         stamp_cognito(_launcher_tmp)
+        stamp_download_url(_launcher_tmp)
         # Fail fast if stamping produced invalid Python.
         with open(_launcher_tmp, "r", encoding="utf-8") as _f:
             compile(_f.read(), _launcher_tmp, "exec")
