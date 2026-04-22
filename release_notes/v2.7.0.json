@@ -1,0 +1,11 @@
+{
+  "summary": "Trading reliability fixes, chart-line stability, and launcher quality-of-life improvements.",
+  "release_notes": [
+    "Improved fill handling and position reconstruction so rapid close/re-entry flows no longer drift from TWS state.",
+    "Order-line rendering now supports per-chart visibility reliably, including redraw stability and duplicate-line prevention during settings changes and refreshes.",
+    "Auto-exit lines were hardened for multi-chart rendering and refresh restoration behavior.",
+    "Settings behavior was refined so non-connection tabs are hidden only when the disconnected overlay is active.",
+    "Windows launcher now respects saved startup connection preferences and keeps only the latest local launcher log session.",
+    "Auto-exit subrow now shows a left-side arrow indicator (↳) to visually relate it to the parent order above."
+  ]
+}

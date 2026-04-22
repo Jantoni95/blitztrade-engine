@@ -27,6 +27,10 @@ import webbrowser
 import zipfile
 
 
+_early_log_lock = threading.Lock()
+_early_log_initialized = False
+
+
 def _early_log_path():
     app_data = os.path.join(
         os.environ.get("LOCALAPPDATA") or os.environ.get("HOME") or os.getcwd(),
@@ -37,10 +41,14 @@ def _early_log_path():
 
 
 def _early_log(message):
+    global _early_log_initialized
     try:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(_early_log_path(), "a", encoding="utf-8") as f:
-            f.write(f"[{stamp}] pid={os.getpid()} {message}\n")
+        with _early_log_lock:
+            mode = "w" if not _early_log_initialized else "a"
+            with open(_early_log_path(), mode, encoding="utf-8") as f:
+                f.write(f"[{stamp}] pid={os.getpid()} {message}\n")
+            _early_log_initialized = True
     except Exception:
         pass
 
@@ -81,6 +89,48 @@ IBGW_DOWNLOAD_PAGE = os.environ.get(
 COGNITO_REGION = "eu-central-1"
 COGNITO_USER_POOL_ID = ""
 COGNITO_CLIENT_ID = ""
+
+
+def _app_data_dir():
+    path = os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.environ.get("HOME") or str(Path.home()),
+        "BlitzTrade",
+    )
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _startup_prefs_path():
+    return os.path.join(_app_data_dir(), "startup_prefs.json")
+
+
+def _load_startup_prefs():
+    try:
+        with open(_startup_prefs_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception:
+        return {}
+
+
+def _save_startup_prefs(conn_mode=None, auto_start_gw=None):
+    prefs = _load_startup_prefs()
+    if conn_mode is not None:
+        prefs["connMode"] = "tws" if conn_mode == "tws" else "gateway"
+    if auto_start_gw is not None:
+        prefs["autoStartGW"] = bool(auto_start_gw)
+    with open(_startup_prefs_path(), "w", encoding="utf-8") as f:
+        json.dump(prefs, f)
+    return prefs
+
+
+def _should_auto_launch_ibgw():
+    prefs = _load_startup_prefs()
+    conn_mode = prefs.get("connMode", "gateway")
+    auto_start_gw = bool(prefs.get("autoStartGW", False))
+    return conn_mode == "gateway" and auto_start_gw
 
 
 def _fetch_cognito_from_stack():
@@ -187,6 +237,7 @@ def _base_dir():
 BASE_DIR = _base_dir()
 _single_instance_handle = None
 _log_lock = threading.Lock()
+_log_initialized = False
 
 
 def _is_packaged_runtime():
@@ -203,16 +254,19 @@ def _log_path():
 
 
 def _log(message):
+    global _log_initialized
     try:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         line = (
             f"[{stamp}] pid={os.getpid()} tid={threading.get_ident()} " f"{message}\n"
         )
         with _log_lock:
-            with open(_log_path(), "a", encoding="utf-8") as f:
+            mode = "w" if not _log_initialized else "a"
+            with open(_log_path(), mode, encoding="utf-8") as f:
                 f.write(line)
             with open(_early_log_path(), "a", encoding="utf-8") as f:
                 f.write(line)
+            _log_initialized = True
         # Also print to stderr for debugging
         print(f"[LOG] {line.strip()}", file=sys.stderr)
     except Exception as e:
@@ -1417,6 +1471,19 @@ class BlitzAPI:
         except Exception:
             return False
 
+    def save_startup_preferences(self, conn_mode=None, auto_start_gw=None):
+        try:
+            return _save_startup_prefs(conn_mode=conn_mode, auto_start_gw=auto_start_gw)
+        except Exception:
+            _log("save_startup_preferences_error: " + traceback.format_exc().strip())
+            return False
+
+    def get_startup_preferences(self):
+        try:
+            return _load_startup_prefs()
+        except Exception:
+            return {}
+
     def save_image(self, data_b64, default_name="image.png"):
         """Save a base64-encoded PNG via native file dialog."""
         import base64
@@ -1559,9 +1626,13 @@ def main():
     tws_port = int(tws_port) if tws_port else None  # None = auto-detect
     _log(f"launcher_tws_port: {tws_port}")
 
-    # Auto-launch IB Gateway if installed but not running
-    threading.Thread(target=_auto_launch_ibgw_if_needed, daemon=True).start()
-    _log("launcher_auto_ibgw_thread_started")
+    # Auto-launch IB Gateway only when the saved native startup preference
+    # explicitly requests Gateway mode with auto-start enabled.
+    if _should_auto_launch_ibgw():
+        threading.Thread(target=_auto_launch_ibgw_if_needed, daemon=True).start()
+        _log("launcher_auto_ibgw_thread_started")
+    else:
+        _log("launcher_auto_ibgw_skipped_by_preferences")
 
     # Check for updates in background
     threading.Thread(target=_check_for_updates, daemon=True).start()
