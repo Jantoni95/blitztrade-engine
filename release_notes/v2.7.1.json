@@ -1,0 +1,9 @@
+{
+  "summary": "Live volume restoration and chart stability fixes for IB streaming.",
+  "release_notes": [
+    "Restored live volume updates by wiring hvol keepUpToDate subscriptions into the market-data subscription lifecycle, so field 87 now updates in real time for active symbols.",
+    "Hardened candle-volume mapping in the chart so active-bar volume is computed from cumulative field 87 anchored per candle bucket.",
+    "Removed synthetic timer-drawn volume bars so volume appears only when real market volume data is received.",
+    "Reduced live price jumpiness by preferring trade-tick-driven price updates when recent trade ticks are available."
+  ]
+}

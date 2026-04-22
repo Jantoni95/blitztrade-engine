@@ -276,6 +276,15 @@ _depth_subs: dict = {}  # conid -> set of WS clients
 _conid_to_contract: dict = {}
 _conid_to_md_ticker: dict = {}  # conid -> Ticker from reqMktData
 _conid_to_tbt_ticker: dict = {}  # conid -> Ticker from reqTickByTickData
+_conid_to_hvol_bars: dict = (
+    {}
+)  # conid -> BarDataList from reqHistoricalData(keepUpToDate=True)
+_conid_to_hvol_cum: dict = (
+    {}
+)  # conid -> day cumulative volume derived from keepUpToDate bars
+_barlive_subs: dict = {}  # "conid|tf" -> set of WS clients
+_barlive_bars: dict = {}  # "conid|tf" -> BarDataList keepUpToDate subscription
+_barlive_pending: set = set()  # keys queued/in-flight for live bar keepUpToDate
 _conid_to_depth_ticker: dict = {}  # conid -> Ticker from reqMktDepth
 _mderr_conids: dict = {}  # conid -> error message (market data not subscribed)
 _exec_cache = None  # cached reqExecutionsAsync result
@@ -302,6 +311,16 @@ _float_cache: dict = {}
 _country_cache: dict = {}
 # Average volume cache: conid -> avg daily volume (30-day)
 _avg_vol_cache: dict = {}
+
+# Volume mode: "hvol" (historical keepUpToDate) or "tbt" (tick size 88)
+_VOLUME_MODE = "hvol"
+
+# Historical volume queue (sequential, non-blocking, non-redundant)
+_hvol_queue: asyncio.Queue | None = None
+_hvol_pending: set = set()  # conids queued/in-flight for hvol keepUpToDate
+_hvol_worker_task = None
+_barlive_queue: asyncio.Queue | None = None
+_barlive_worker_task = None
 
 # aiohttp event loop (set during startup)
 _aio_loop: asyncio.AbstractEventLoop = None
@@ -365,6 +384,11 @@ async def _ib_connect():
         # Clear stale ticker caches from previous connection
         _conid_to_md_ticker.clear()
         _conid_to_tbt_ticker.clear()
+        _conid_to_hvol_bars.clear()
+        _conid_to_hvol_cum.clear()
+        _hvol_pending.clear()
+        _barlive_bars.clear()
+        _barlive_pending.clear()
         _conid_to_depth_ticker.clear()
         # Cancel any pending depth debounce timers
         for h in _depth_pending.values():
@@ -380,6 +404,14 @@ async def _ib_connect():
                     await _sub_md(conid)
                 except Exception as e:
                     log.warning(f"Re-sub MD for {conid} failed: {e}")
+        for key in list(_barlive_subs.keys()):
+            if _barlive_subs[key]:
+                try:
+                    conid, tf = _split_barlive_key(key)
+                    if conid and tf:
+                        await _sub_barlive(conid, tf)
+                except Exception as e:
+                    log.warning(f"Re-sub live bar for {key} failed: {e}")
         for conid in list(_depth_subs.keys()):
             if _depth_subs[conid]:  # has active clients
                 try:
@@ -598,7 +630,12 @@ async def _await_ib(coro, timeout=15):
     if not ib_connected:
         raise ConnectionError("IB not connected")
     fut = _sched(coro)
-    return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=timeout)
+    wrapped = asyncio.wrap_future(fut)
+    try:
+        return await asyncio.wait_for(wrapped, timeout=timeout)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        fut.cancel()
+        raise
 
 
 # ── Broadcast helpers ────────────────────────────────────────
@@ -647,8 +684,7 @@ def _on_pending_tickers(tickers):
 
 def _ticker_to_fields(t, conid):
     """Convert Ticker -> field-numbered JSON the frontend expects."""
-    msg = {"conid": int(conid), "server_id": "tws"}
-    rt_trade_cum = None
+    msg = {"conid": int(conid), "server_id": "tws", "_srvTs": int(time.time())}
     rt_trade_size = None
     rt_trade = getattr(t, "rtTradeVolume", None)
     if isinstance(rt_trade, str) and rt_trade:
@@ -659,10 +695,6 @@ def _ticker_to_fields(t, conid):
                 rt_trade_size = float(parts[1])
             except Exception:
                 rt_trade_size = None
-            try:
-                rt_trade_cum = float(parts[3])
-            except Exception:
-                rt_trade_cum = None
     # Only include last price when it actually changed (avoid stale last on bid/ask updates)
     last_changed = _is_num(t.last) and (not _is_num(t.prevLast) or t.last != t.prevLast)
     if last_changed:
@@ -671,10 +703,10 @@ def _ticker_to_fields(t, conid):
         msg["84"] = str(t.bid)
     if _is_num(t.ask):
         msg["86"] = str(t.ask)
-    if rt_trade_cum is not None and rt_trade_cum >= 0:
-        msg["87"] = str(int(rt_trade_cum))
-    elif _is_num(t.volume):
-        msg["87"] = str(int(t.volume))
+    # Volume (87) is authoritative from keepUpToDate historical bars only.
+    hvol = _conid_to_hvol_cum.get(conid)
+    if hvol is not None:
+        msg["87"] = str(int(hvol))
     if last_changed:
         if rt_trade_size is not None and rt_trade_size >= 0:
             msg["88"] = str(int(rt_trade_size))
@@ -744,22 +776,341 @@ def _is_num(v):
     return v is not None and v == v  # filters NaN
 
 
+_BARLIVE_PARAMS = {
+    "1S": ("1800 S", "1 secs"),
+    "5S": ("3600 S", "5 secs"),
+    "10S": ("3600 S", "10 secs"),
+    "1": ("2 D", "1 min"),
+    "5": ("2 W", "5 mins"),
+    "15": ("2 W", "15 mins"),
+    "120": ("1 M", "2 hours"),
+    "240": ("3 M", "4 hours"),
+}
+
+
+def _barlive_key(conid, tf):
+    return f"{conid}|{tf}"
+
+
+def _split_barlive_key(key):
+    parts = str(key).split("|", 1)
+    if len(parts) != 2:
+        return None, None
+    return parts[0], parts[1]
+
+
+def _bar_to_epoch_seconds(bar_date):
+    if isinstance(bar_date, datetime):
+        if bar_date.tzinfo is None:
+            bar_date = bar_date.replace(tzinfo=timezone.utc)
+        return int(bar_date.timestamp())
+    return int(float(str(bar_date)))
+
+
+def _send_barlive_to_clients(key, msg):
+    clients = _barlive_subs.get(key)
+    if not clients:
+        return
+    data = json.dumps(msg)
+    dead = []
+    for ws in list(clients):
+        try:
+            _send_to_ws(ws, data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        clients.discard(ws)
+
+
+def _emit_barlive_update(key, bars, has_new_bar=False):
+    if not bars:
+        return
+    conid, tf = _split_barlive_key(key)
+    if not conid or not tf:
+        return
+    try:
+        bar = bars[-1]
+    except Exception:
+        return
+    try:
+        bar_time = _bar_to_epoch_seconds(getattr(bar, "date", None))
+    except Exception:
+        return
+    msg = {
+        "conid": int(conid),
+        "server_id": "tws",
+        "_srvTs": int(time.time()),
+        "_liveBar": True,
+        "_barTf": tf,
+        "_barTime": bar_time,
+        "o": float(getattr(bar, "open", 0) or 0),
+        "h": float(getattr(bar, "high", 0) or 0),
+        "l": float(getattr(bar, "low", 0) or 0),
+        "c": float(getattr(bar, "close", 0) or 0),
+        "v": int(float(getattr(bar, "volume", 0) or 0)),
+        "_hasNewBar": bool(has_new_bar),
+    }
+    _send_barlive_to_clients(key, msg)
+
+
+def _on_barlive_update(bars, has_new_bar, key):
+    try:
+        _emit_barlive_update(key, bars, has_new_bar=has_new_bar)
+    except Exception as e:
+        log.warning(f"Live bar update failed for {key}: {e}")
+
+
+def _hvol_day_key(dt_obj):
+    try:
+        if isinstance(dt_obj, datetime):
+            return dt_obj.date().isoformat()
+        # formatDate=2 can still produce epoch-like values in some paths
+        return (
+            datetime.fromtimestamp(float(str(dt_obj)), tz=timezone.utc)
+            .date()
+            .isoformat()
+        )
+    except Exception:
+        return None
+
+
+def _calc_hvol_cumulative(bars):
+    """Compute cumulative session volume from keepUpToDate bars for latest bar day."""
+    if not bars:
+        return None
+    try:
+        last = bars[-1]
+    except Exception:
+        return None
+    day_key = _hvol_day_key(getattr(last, "date", None))
+    if not day_key:
+        return None
+    total = 0
+    for b in bars:
+        if _hvol_day_key(getattr(b, "date", None)) != day_key:
+            continue
+        try:
+            v = float(getattr(b, "volume", 0) or 0)
+        except Exception:
+            v = 0
+        if v > 0:
+            total += int(v)
+    return int(total)
+
+
+def _emit_hvol_update(conid, cum_vol):
+    if cum_vol is None:
+        return
+    _conid_to_hvol_cum[conid] = int(cum_vol)
+    _broadcast(
+        conid,
+        _md_subs,
+        {
+            "conid": int(conid),
+            "server_id": "tws",
+            "87": str(int(cum_vol)),
+            "_hvol": True,
+        },
+    )
+
+
+def _on_hvol_update(bars, has_new_bar, conid):
+    """Historical keepUpToDate callback: recompute and broadcast cumulative volume."""
+    try:
+        cum = _calc_hvol_cumulative(bars)
+        _emit_hvol_update(conid, cum)
+    except Exception as e:
+        log.warning(f"HVol update failed for {conid}: {e}")
+
+
+async def _ensure_hvol_worker():
+    global _hvol_queue, _hvol_worker_task
+    if _hvol_queue is None:
+        _hvol_queue = asyncio.Queue()
+    if _hvol_worker_task and not _hvol_worker_task.done():
+        return
+    _hvol_worker_task = asyncio.create_task(_hvol_worker())
+
+
+async def _hvol_worker():
+    """Sequentially process historical keepUpToDate subscriptions (no request stacking)."""
+    while True:
+        conid = await _hvol_queue.get()
+        try:
+            if conid not in _hvol_pending:
+                continue
+            if conid in _conid_to_hvol_bars:
+                _hvol_pending.discard(conid)
+                continue
+
+            contract = await _resolve_contract(conid)
+            if not contract:
+                _hvol_pending.discard(conid)
+                continue
+
+            bars = await ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime="",
+                durationStr="2 D",
+                barSizeSetting="1 min",
+                whatToShow="TRADES",
+                useRTH=False,
+                formatDate=2,
+                keepUpToDate=True,
+            )
+            if not bars:
+                _hvol_pending.discard(conid)
+                continue
+
+            _conid_to_hvol_bars[conid] = bars
+            bars.updateEvent += lambda b, has_new_bar, c=conid: _on_hvol_update(
+                b, has_new_bar, c
+            )
+            _emit_hvol_update(conid, _calc_hvol_cumulative(bars))
+            _hvol_pending.discard(conid)
+            log.info(f"HVol keepUpToDate subscribed: {conid} ({contract.symbol})")
+        except Exception as e:
+            _hvol_pending.discard(conid)
+            log.warning(f"HVol subscribe failed for {conid}: {e}")
+
+
+async def _sub_hvol(conid, contract=None):
+    if conid in _conid_to_hvol_bars or conid in _hvol_pending:
+        return
+    await _ensure_hvol_worker()
+    _hvol_pending.add(conid)
+    await _hvol_queue.put(conid)
+
+
+async def _unsub_hvol(conid):
+    _hvol_pending.discard(conid)
+    bars = _conid_to_hvol_bars.pop(conid, None)
+    _conid_to_hvol_cum.pop(conid, None)
+    if bars is not None:
+        try:
+            ib.cancelHistoricalData(bars)
+        except Exception:
+            pass
+
+
+async def _ensure_barlive_worker():
+    global _barlive_queue, _barlive_worker_task
+    if _barlive_queue is None:
+        _barlive_queue = asyncio.Queue()
+    if _barlive_worker_task and not _barlive_worker_task.done():
+        return
+    _barlive_worker_task = asyncio.create_task(_barlive_worker())
+
+
+async def _barlive_worker():
+    while True:
+        key = await _barlive_queue.get()
+        try:
+            if key not in _barlive_pending:
+                continue
+            if key in _barlive_bars:
+                _barlive_pending.discard(key)
+                continue
+            conid, tf = _split_barlive_key(key)
+            duration, bar_size = _BARLIVE_PARAMS.get(str(tf), (None, None))
+            if not conid or not duration or not bar_size:
+                _barlive_pending.discard(key)
+                continue
+            contract = await _resolve_contract(conid)
+            if not contract:
+                _barlive_pending.discard(key)
+                continue
+            bars = await ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime="",
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow="TRADES",
+                useRTH=False,
+                formatDate=2,
+                keepUpToDate=True,
+            )
+            if not bars:
+                _barlive_pending.discard(key)
+                continue
+            _barlive_bars[key] = bars
+            bars.updateEvent += lambda b, has_new_bar, k=key: _on_barlive_update(
+                b, has_new_bar, k
+            )
+            _emit_barlive_update(key, bars, has_new_bar=False)
+            _barlive_pending.discard(key)
+            log.info(f"Live bar keepUpToDate subscribed: {key} ({contract.symbol})")
+        except Exception as e:
+            _barlive_pending.discard(key)
+            log.warning(f"Live bar subscribe failed for {key}: {e}")
+
+
+async def _sub_barlive(conid, tf):
+    key = _barlive_key(conid, tf)
+    if key in _barlive_bars or key in _barlive_pending:
+        return
+    await _ensure_barlive_worker()
+    _barlive_pending.add(key)
+    await _barlive_queue.put(key)
+
+
+async def _unsub_barlive(conid, tf):
+    key = _barlive_key(conid, tf)
+    _barlive_pending.discard(key)
+    bars = _barlive_bars.pop(key, None)
+    if bars is not None:
+        try:
+            ib.cancelHistoricalData(bars)
+        except Exception:
+            pass
+
+
 def _on_tbt_update(ticker, conid):
-    """Callback for tick-by-tick AllLast — each call = one real trade print."""
+    """Callback for tick-by-tick Last — each call = one real trade print."""
     ticks = ticker.tickByTicks
     if not ticks:
         return
     tick = ticks[-1]
-    if not hasattr(tick, "price") or tick.price is None:
+    # Filter out anomalous/non-standard prints for chart consistency.
+    tick_attrib = getattr(tick, "tickAttribLast", None)
+    past_limit = getattr(tick, "pastLimit", False) or getattr(
+        tick_attrib, "pastLimit", False
+    )
+    unreported = getattr(tick, "unreported", False) or getattr(
+        tick_attrib, "unreported", False
+    )
+    #   pastLimit=True  -> IB marks the price as outside normal range (spike risk)
+    #   unreported=True -> non-standard prints that can diverge from historical TRADES
+    #   size == 0       -> condition-only markers (e.g. halted/unhalted)
+    size = getattr(tick, "size", 0) or 0
+    if size <= 0:
+        return
+    filtered = past_limit or unreported
+    if filtered and _VOLUME_MODE != "tbt":
         return
 
     msg = {
         "conid": int(conid),
         "server_id": "tws",
-        "31": str(tick.price),
-        "88": str(tick.size),
+        "_srvTs": int(time.time()),
+        "88": str(int(size)),
         "_tbt": True,  # flag: this is a real individual trade print
     }
+    tick_time = getattr(tick, "time", None)
+    if tick_time is not None:
+        try:
+            if isinstance(tick_time, datetime):
+                if tick_time.tzinfo is None:
+                    tick_time = tick_time.replace(tzinfo=timezone.utc)
+                msg["_tbtTs"] = int(tick_time.timestamp())
+            else:
+                msg["_tbtTs"] = int(float(str(tick_time)))
+        except Exception:
+            pass
+    if not filtered:
+        if not hasattr(tick, "price") or tick.price is None:
+            return
+        msg["31"] = str(tick.price)
     # Include latest bid/ask from streaming MD
     md = _conid_to_md_ticker.get(conid)
     if md:
@@ -949,6 +1300,9 @@ async def _sub_md(conid):
     t = ib.reqMktData(contract, genericTickList="100,236,375", snapshot=False)
     _conid_to_md_ticker[conid] = t
     log.info(f"MD subscribed: {conid} ({contract.symbol})")
+    # In hvol mode, field 87 comes from keepUpToDate historical bars.
+    # Ensure the hvol stream is active for each subscribed conid.
+    await _sub_hvol(conid, contract)
     # Also start tick-by-tick for real T&S
     await _sub_tbt(conid, contract)
 
@@ -963,6 +1317,7 @@ async def _unsub_md(conid):
         return
     ib.cancelMktData(t.contract)
     await _unsub_tbt(conid)
+    await _unsub_hvol(conid)
     log.info(f"MD unsubscribed: {conid}")
 
 
@@ -973,7 +1328,8 @@ async def _sub_tbt(conid, contract=None):
         contract = await _resolve_contract(conid)
     if not contract:
         return
-    t = ib.reqTickByTickData(contract, tickType="AllLast")
+    # Use Last (not AllLast) so live prints align with historical TRADES bars.
+    t = ib.reqTickByTickData(contract, tickType="Last")
     _conid_to_tbt_ticker[conid] = t
     t.updateEvent += lambda ticker, c=conid: _on_tbt_update(ticker, c)
     log.info(f"TBT subscribed: {conid} ({contract.symbol})")
@@ -982,7 +1338,7 @@ async def _sub_tbt(conid, contract=None):
 async def _unsub_tbt(conid):
     t = _conid_to_tbt_ticker.pop(conid, None)
     if t and t.contract:
-        ib.cancelTickByTickData(t.contract, "AllLast")
+        ib.cancelTickByTickData(t.contract, "Last")
 
 
 _depth_sub_in_flight: set = set()  # conids currently being subscribed
@@ -1497,6 +1853,191 @@ async def _history(conid, duration, bar_size, end_dt="", what_to_show="TRADES"):
     except Exception as e:
         log.error(f"History fetch: {e}")
         return {"data": []}
+
+
+def _bucket_epoch(sec: int, interval_sec: int) -> int:
+    return int((sec // interval_sec) * interval_sec)
+
+
+def _agg_ticks_to_bars(ticks, interval_sec=10):
+    bars = {}
+    for t in ticks or []:
+        ts = getattr(t, "time", None)
+        px = getattr(t, "price", None)
+        sz = getattr(t, "size", None)
+        attrib = getattr(t, "tickAttribLast", None)
+        past_limit = (
+            getattr(t, "pastLimit", False)
+            or getattr(attrib, "pastLimit", False)
+            or getattr(attrib, "PastLimit", False)
+        )
+        unreported = (
+            getattr(t, "unreported", False)
+            or getattr(attrib, "unreported", False)
+            or getattr(attrib, "Unreported", False)
+        )
+        if ts is None or px is None or sz is None:
+            continue
+        try:
+            sec = int(ts.timestamp()) if isinstance(ts, datetime) else int(ts)
+            price = float(px)
+            size = float(sz)
+        except Exception:
+            continue
+        if past_limit or unreported:
+            continue
+        if size <= 0 or price <= 0:
+            continue
+        b = _bucket_epoch(sec, interval_sec)
+        rec = bars.get(b)
+        if rec is None:
+            bars[b] = {
+                "time": b,
+                "o": price,
+                "h": price,
+                "l": price,
+                "c": price,
+                "v": size,
+                "n": 1,
+            }
+        else:
+            if price > rec["h"]:
+                rec["h"] = price
+            if price < rec["l"]:
+                rec["l"] = price
+            rec["c"] = price
+            rec["v"] += size
+            rec["n"] += 1
+    return bars
+
+
+async def h_debug_tick_bar_compare(req):
+    """Compare historical ticks aggregated to bars against historical TRADES bars.
+
+    Query params:
+      conid (required)
+      barSec (default 10)
+      lookbackSec (default 900, max 7200)
+      maxTicks (default 1000, max 1000 per IB call)
+    """
+    conid = str(req.query.get("conid", "")).strip()
+    if not conid:
+        return web.json_response({"ok": False, "error": "missing conid"}, status=400)
+
+    try:
+        bar_sec = max(5, int(req.query.get("barSec", "10")))
+    except Exception:
+        bar_sec = 10
+    try:
+        lookback_sec = max(60, min(7200, int(req.query.get("lookbackSec", "900"))))
+    except Exception:
+        lookback_sec = 900
+    try:
+        max_ticks = max(100, min(1000, int(req.query.get("maxTicks", "1000"))))
+    except Exception:
+        max_ticks = 1000
+
+    contract = await _resolve_contract(conid)
+    if not contract:
+        return web.json_response(
+            {"ok": False, "error": f"cannot resolve conid {conid}"}, status=404
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    start_utc = now_utc - timedelta(seconds=lookback_sec)
+    duration = f"{lookback_sec} S" if lookback_sec <= 3600 else "1 D"
+    bar_size = f"{bar_sec} secs"
+
+    try:
+        ticks = await ib.reqHistoricalTicksAsync(
+            contract,
+            startDateTime=start_utc,
+            endDateTime=now_utc,
+            numberOfTicks=max_ticks,
+            whatToShow="TRADES",
+            useRth=False,
+            ignoreSize=False,
+        )
+    except Exception as e:
+        return web.json_response(
+            {"ok": False, "error": f"reqHistoricalTicksAsync failed: {e}"}, status=500
+        )
+
+    try:
+        hbars = await ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime=now_utc,
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow="TRADES",
+            useRTH=False,
+            formatDate=2,
+        )
+    except Exception as e:
+        return web.json_response(
+            {"ok": False, "error": f"reqHistoricalDataAsync failed: {e}"}, status=500
+        )
+
+    tick_bars = _agg_ticks_to_bars(ticks, interval_sec=bar_sec)
+    hist_map = {}
+    for b in hbars or []:
+        dt = b.date
+        sec = int(dt.timestamp()) if isinstance(dt, datetime) else int(float(str(dt)))
+        hist_map[sec] = {
+            "time": sec,
+            "o": float(b.open),
+            "h": float(b.high),
+            "l": float(b.low),
+            "c": float(b.close),
+            "v": float(b.volume or 0),
+        }
+
+    keys = sorted(k for k in tick_bars.keys() if k in hist_map)
+    rows = []
+    for k in keys:
+        tb = tick_bars[k]
+        hb = hist_map[k]
+        rows.append(
+            {
+                "time": k,
+                "liveO": tb["o"],
+                "histO": hb["o"],
+                "dO": round(abs(tb["o"] - hb["o"]), 6),
+                "liveC": tb["c"],
+                "histC": hb["c"],
+                "dC": round(abs(tb["c"] - hb["c"]), 6),
+                "liveV": round(tb["v"], 4),
+                "histV": round(hb["v"], 4),
+                "dV": round(abs(tb["v"] - hb["v"]), 4),
+                "ticks": tb["n"],
+            }
+        )
+
+    o_bad = sum(1 for r in rows if r["dO"] > 0.001)
+    c_bad = sum(1 for r in rows if r["dC"] > 0.001)
+    v_bad = sum(1 for r in rows if r["dV"] > 0)
+    dv_sum = round(sum(r["dV"] for r in rows), 4)
+    hv_sum = round(sum(r["histV"] for r in rows), 4)
+    dv_pct = round((dv_sum / hv_sum * 100), 4) if hv_sum > 0 else 0.0
+
+    return web.json_response(
+        {
+            "ok": True,
+            "conid": int(conid),
+            "barSec": bar_sec,
+            "lookbackSec": lookback_sec,
+            "tickCount": len(ticks or []),
+            "histBarCount": len(hbars or []),
+            "comparedBars": len(rows),
+            "openMismatchBars": o_bad,
+            "closeMismatchBars": c_bad,
+            "volumeMismatchBars": v_bad,
+            "volumeAbsDiff": dv_sum,
+            "histVolumeTotal": hv_sum,
+            "volumeDiffPctOfHist": dv_pct,
+            "sample": rows[:20],
+        }
+    )
 
 
 def _history_retry_durations(duration):
@@ -2561,7 +3102,9 @@ async def _orders():
                     "remainingQuantity": st.remaining if st else o.totalQuantity,
                     "orderType": o.orderType,
                     "price": o.lmtPrice if o.orderType == "LMT" else 0,
-                    "auxPrice": o.auxPrice if hasattr(o, "auxPrice") and o.auxPrice else 0,
+                    "auxPrice": (
+                        o.auxPrice if hasattr(o, "auxPrice") and o.auxPrice else 0
+                    ),
                     "avgPrice": st.avgFillPrice if st else 0,
                     "status": st.status if st else "Unknown",
                     "lastExecutionTime": "",
@@ -3403,11 +3946,8 @@ async def _fetch_ib_kpis(ticker):
 
     # ── 1. ReportSnapshot for business summary, employees, sector ──
     try:
-        xml_str = await asyncio.wait_for(
-            _await_ib(
-                ib.reqFundamentalDataAsync(contract, "ReportSnapshot"), timeout=10
-            ),
-            timeout=12,
+        xml_str = await _await_ib(
+            ib.reqFundamentalDataAsync(contract, "ReportSnapshot"), timeout=12
         )
         if xml_str:
             root = ET.fromstring(xml_str)
@@ -4205,6 +4745,55 @@ async def h_ws(req):
                                 pass
                     continue
 
+                # sbh+{conid}+{tf}
+                if d.startswith("sbh+"):
+                    parts = d.split("+", 2)
+                    if len(parts) >= 3:
+                        conid = parts[1]
+                        tf = parts[2]
+                        key = _barlive_key(conid, tf)
+                        _barlive_subs.setdefault(key, set()).add(ws)
+                        _sched(_sub_barlive(conid, tf))
+                        bars = _barlive_bars.get(key)
+                        if bars:
+                            try:
+                                _send_to_ws(
+                                    ws,
+                                    json.dumps(
+                                        {
+                                            "conid": int(conid),
+                                            "server_id": "tws",
+                                            "_srvTs": int(time.time()),
+                                            "_liveBar": True,
+                                            "_barTf": tf,
+                                            "_barTime": _bar_to_epoch_seconds(getattr(bars[-1], "date", None)),
+                                            "o": float(getattr(bars[-1], "open", 0) or 0),
+                                            "h": float(getattr(bars[-1], "high", 0) or 0),
+                                            "l": float(getattr(bars[-1], "low", 0) or 0),
+                                            "c": float(getattr(bars[-1], "close", 0) or 0),
+                                            "v": int(float(getattr(bars[-1], "volume", 0) or 0)),
+                                            "_hasNewBar": False,
+                                        }
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                    continue
+
+                # ubh+{conid}+{tf}
+                if d.startswith("ubh+"):
+                    parts = d.split("+", 2)
+                    if len(parts) >= 3:
+                        conid = parts[1]
+                        tf = parts[2]
+                        key = _barlive_key(conid, tf)
+                        s = _barlive_subs.get(key, set())
+                        s.discard(ws)
+                        if not s:
+                            _barlive_subs.pop(key, None)
+                            _sched(_unsub_barlive(conid, tf))
+                    continue
+
                 # umd+{conid}+{}
                 if d.startswith("umd+"):
                     parts = d.split("+", 2)
@@ -4273,6 +4862,13 @@ async def h_ws(req):
             if not clients:
                 del _md_subs[conid]
                 _sched(_unsub_md(conid))
+        for key, clients in list(_barlive_subs.items()):
+            clients.discard(ws)
+            if not clients:
+                _barlive_subs.pop(key, None)
+                conid, tf = _split_barlive_key(key)
+                if conid and tf:
+                    _sched(_unsub_barlive(conid, tf))
         for conid, clients in list(_depth_subs.items()):
             clients.discard(ws)
             if not clients:
@@ -4708,6 +5304,7 @@ def create_app():
     app.router.add_get("/v1/api/iserver/marketdata/snapshot", h_snapshot)
     app.router.add_get("/v1/api/iserver/marketdata/depth", h_depth_snapshot)
     app.router.add_get("/v1/api/debug/depth-probe", h_depth_probe)
+    app.router.add_get("/v1/api/debug/tick-bar-compare", h_debug_tick_bar_compare)
     app.router.add_get("/v1/api/iserver/marketdata/history", h_history)
     app.router.add_post("/v1/api/iserver/secdef/search", h_search)
     app.router.add_get("/v1/api/portfolio/accounts", h_accounts)
