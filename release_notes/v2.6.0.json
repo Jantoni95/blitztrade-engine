@@ -1,0 +1,9 @@
+{
+  "summary": "Auto-exit UI cleanup, gateway docs refresh, and download auth hardening.",
+  "release_notes": [
+    "Auto-exit indication moved from inline ticker cell to a dedicated sub-row beneath the entry order for cleaner readability.",
+    "Help and release docs were refreshed for Windows flows, including corrected download URL examples and PowerShell commands.",
+    "Download API auth handling now accepts Authorization headers case-insensitively to prevent false 401 errors.",
+    "Gateway and TWS connection modes use strictly separated ports with no cross-fallback between 4001/4002 and 7497/7496."
+  ]
+}

@@ -207,18 +207,18 @@ if not COGNITO_USER_POOL_ID or not COGNITO_CLIENT_ID:
         pass
 
 # Ports grouped by connection mode preference.
-# gateway: IB Gateway live/paper first, then TWS paper/live fallback
-# tws: TWS paper/live first, then IB Gateway live/paper fallback
-_PORTS_GATEWAY_FIRST = [4001, 4002, 7497, 7496]
-_PORTS_TWS_FIRST = [7497, 7496, 4001, 4002]
+# gateway: IB Gateway live/paper only
+# tws: TWS paper/live only
+_PORTS_GATEWAY = [4001, 4002]
+_PORTS_TWS = [7497, 7496]
 _connection_mode_preference = "gateway"  # "gateway" or "tws"
 _manual_disconnect_in_progress = False
 
 
 def _candidate_ports_for_mode():
     if _connection_mode_preference == "tws":
-        return _PORTS_TWS_FIRST
-    return _PORTS_GATEWAY_FIRST
+        return _PORTS_TWS
+    return _PORTS_GATEWAY
 
 
 # Parse CLI args
