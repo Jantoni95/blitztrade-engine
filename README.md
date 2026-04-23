@@ -4,7 +4,7 @@ This is the **open-source engine** behind [BlitzTrade](https://blitztrade.io) �
 
 We publish this code so you can see exactly what runs on your computer. No hidden logic, no data collection, no backdoors — just a straightforward bridge between your browser and your IB account.
 
-> **This is not the full application.** The user interface (what you actually see and interact with) is not included here. To use BlitzTrade, download the app from [blitztrade.io](https://blitztrade.io).
+> **This is not the full application.** The user interface (what you actually see and interact with) is not included here. To use BlitzTrade Terminal, get access via [blitztrade.io/terminal](https://blitztrade.io/terminal).
 
 ---
 
@@ -12,9 +12,10 @@ We publish this code so you can see exactly what runs on your computer. No hidde
 
 | File | What it does |
 |------|-------------|
+| **`publish_source.py`** | **Mirror publish pipeline** — syncs approved files from private repo to public repo and updates `PUBLISH_LOG.md` with source-commit traceability |
 | `serve.py` | The core engine — connects to TWS/IB Gateway via the API and serves data to the UI over REST + WebSocket |
 | `launcher.py` | Opens the app window on your desktop |
-| `build_app.py` | Compiles the engine into the downloadable binary |
+| `build_app.py` | Compiles the engine into the packaged runtime binary |
 | `build_installer.py` | Packages the Windows installer |
 | `tests/` | Automated tests for order flow, positions, brackets, etc. |
 | `start.sh` / `start.bat` | Start scripts for macOS/Linux and Windows |
@@ -22,7 +23,7 @@ We publish this code so you can see exactly what runs on your computer. No hidde
 
 ## What's NOT in this repo?
 
-The **user interface** (`index.html`) — the screener, charts, trading panel, alerts, and everything you see on screen. That's the product you get when you download BlitzTrade.
+The **user interface** (`index.html`) — the screener, charts, trading panel, alerts, and everything you see on screen. That's part of the hosted BlitzTrade Terminal experience at [blitztrade.io/terminal](https://blitztrade.io/terminal).
 
 ## Why publish this?
 
@@ -32,7 +33,7 @@ The **user interface** (`index.html`) — the screener, charts, trading panel, a
 - Places, modifies, and cancels orders
 - Streams market data and L2 depth
 - Handles positions and P&L
-- Builds the binary you download
+- Builds the packaged runtime used by BlitzTrade Terminal
 
 If something looks off, [open an issue](https://github.com/Jantoni95/blitztrade-engine/issues) or reach out at [blitztrade.io](https://blitztrade.io).
 
@@ -42,4 +43,4 @@ Every time we release a new version, this repo is updated automatically from our
 
 ---
 
-**Download BlitzTrade →** [blitztrade.io](https://blitztrade.io)
+**BlitzTrade Terminal →** [blitztrade.io/terminal](https://blitztrade.io/terminal)

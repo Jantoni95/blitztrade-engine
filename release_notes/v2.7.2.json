@@ -1,0 +1,12 @@
+{
+  "summary": "Trading terminal hardening and layout upgrades with a simpler, more resilient terminal workflow.",
+  "release_notes": [
+    "Added a new daily Summary view in the Trading Terminal alongside Positions for faster intraday review.",
+    "Expanded the Trading Terminal with draggable split handles and improved responsive sizing across Positions, Summary, Orders, and Hotkeys.",
+    "Persisted the new terminal layout sizing in local settings so the terminal restores more reliably after refresh and restart.",
+    "Improved table and column behavior across terminal sections for cleaner resizing, scrolling, and column-specific layout control.",
+    "Hardened refresh, restore, and live-update behavior across the Trading Terminal to reduce layout shifts and inconsistent state.",
+    "Improved Auto-Exit reliability so trigger handling and live position reconciliation behave more consistently under real-time updates.",
+    "Reduced Level 2 depth subscriptions to the active Trading Terminal symbol so IB depth limits are less likely to block live L2 data."
+  ]
+}

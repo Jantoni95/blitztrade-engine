@@ -252,6 +252,19 @@ while i < len(sys.argv):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tws-bridge")
 
+
+class _IBNoiseFilter(logging.Filter):
+    def filter(self, record):
+        msg = str(record.getMessage())
+        if "Error 162" in msg and "API scanner subscription cancelled" in msg:
+            return False
+        return True
+
+
+# ib_insync emits scanner-cancel noise as ERROR even though it's expected.
+logging.getLogger("ib_insync").addFilter(_IBNoiseFilter())
+logging.getLogger("ib_insync.wrapper").addFilter(_IBNoiseFilter())
+
 # ── Globals ──────────────────────────────────────────────────
 ib: IB = None
 ib_loop: asyncio.AbstractEventLoop = None
@@ -336,9 +349,26 @@ def _run_ib_loop(loop):
     loop.run_forever()
 
 
+def _ib_loop_exception_handler(loop, context):
+    """Suppress known benign timeout noise from cancelled scanner wait_for tasks."""
+    msg = str(context.get("message", ""))
+    exc = context.get("exception")
+    fut = context.get("future")
+    # ib_insync scanner cancellation can surface as an un-retrieved TimeoutError task.
+    if (
+        "Task exception was never retrieved" in msg
+        and isinstance(exc, TimeoutError)
+        and fut is not None
+        and "wait_for" in str(getattr(fut, "get_coro", lambda: "")())
+    ):
+        return
+    loop.default_exception_handler(context)
+
+
 def start_ib():
     global ib, ib_loop, ib_thread
     ib_loop = asyncio.new_event_loop()
+    ib_loop.set_exception_handler(_ib_loop_exception_handler)
     ib = IB()
     ib.RequestTimeout = 30
 
@@ -635,6 +665,11 @@ async def _await_ib(coro, timeout=15):
         return await asyncio.wait_for(wrapped, timeout=timeout)
     except (asyncio.CancelledError, asyncio.TimeoutError):
         fut.cancel()
+        # Drain cancellation result to avoid "Task exception was never retrieved" noise.
+        try:
+            await asyncio.wait_for(asyncio.wrap_future(fut), timeout=0.2)
+        except Exception:
+            pass
         raise
 
 
@@ -4766,12 +4801,26 @@ async def h_ws(req):
                                             "_srvTs": int(time.time()),
                                             "_liveBar": True,
                                             "_barTf": tf,
-                                            "_barTime": _bar_to_epoch_seconds(getattr(bars[-1], "date", None)),
-                                            "o": float(getattr(bars[-1], "open", 0) or 0),
-                                            "h": float(getattr(bars[-1], "high", 0) or 0),
-                                            "l": float(getattr(bars[-1], "low", 0) or 0),
-                                            "c": float(getattr(bars[-1], "close", 0) or 0),
-                                            "v": int(float(getattr(bars[-1], "volume", 0) or 0)),
+                                            "_barTime": _bar_to_epoch_seconds(
+                                                getattr(bars[-1], "date", None)
+                                            ),
+                                            "o": float(
+                                                getattr(bars[-1], "open", 0) or 0
+                                            ),
+                                            "h": float(
+                                                getattr(bars[-1], "high", 0) or 0
+                                            ),
+                                            "l": float(
+                                                getattr(bars[-1], "low", 0) or 0
+                                            ),
+                                            "c": float(
+                                                getattr(bars[-1], "close", 0) or 0
+                                            ),
+                                            "v": int(
+                                                float(
+                                                    getattr(bars[-1], "volume", 0) or 0
+                                                )
+                                            ),
                                             "_hasNewBar": False,
                                         }
                                     ),

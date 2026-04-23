@@ -4,6 +4,15 @@ History of source publications from the BlitzTrade private repository.
 
 ---
 
+### v2.7.2 — 2026-04-23 14:40 UTC
+
+- **Source commit:** `424dad7` (private repo)
+- **Notes:** Release v2.7.2
+- **Included commits:**
+  - Terminal: don't persist position or open state acr(...)
+
+---
+
 ### v2.7.1 — 2026-04-22 18:57 UTC
 
 - **Source commit:** `3d42139` (private repo)
