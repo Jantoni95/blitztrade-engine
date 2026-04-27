@@ -1379,9 +1379,34 @@ async def _unsub_tbt(conid):
 _depth_sub_in_flight: set = set()  # conids currently being subscribed
 
 
+async def _drop_other_depth_subs(active_conid):
+    """Keep exactly one active depth conid globally.
+
+    This is a hard safety net against TWS market-depth slot exhaustion.
+    """
+    active_conid = str(active_conid)
+
+    # Remove listener sets for all other conids.
+    for other in list(_depth_subs.keys()):
+        if str(other) == active_conid:
+            continue
+        _depth_subs.pop(other, None)
+
+    # Cancel live depth subscriptions for all other conids.
+    for other in list(_conid_to_depth_ticker.keys()):
+        if str(other) == active_conid:
+            continue
+        await _unsub_depth(str(other))
+
+
 async def _sub_depth(conid, force=False):
+    conid = str(conid)
     if conid in _depth_sub_in_flight:
         return  # already subscribing — skip duplicate
+
+    # Hard cap: only keep depth for the active Trading Terminal conid.
+    await _drop_other_depth_subs(conid)
+
     if not force and conid in _conid_to_depth_ticker:
         return  # already active
     _depth_sub_in_flight.add(conid)
@@ -1575,6 +1600,27 @@ async def h_depth_probe(req):
         log.error(f"Depth probe: {e}")
         return web.json_response({"error": str(e)}, status=500)
     return web.json_response(result)
+
+
+async def h_depth_state(req):
+    """Debug endpoint: inspect current depth subscription state."""
+    listeners = {
+        str(conid): len(clients or set())
+        for conid, clients in _depth_subs.items()
+    }
+    active = sorted(str(conid) for conid in _conid_to_depth_ticker.keys())
+    return web.json_response(
+        {
+            "listeners": listeners,
+            "activeConids": active,
+            "inFlight": sorted(str(c) for c in _depth_sub_in_flight),
+            "lastRealUpdateAgeSec": {
+                str(conid): round(time.monotonic() - ts, 2)
+                for conid, ts in _depth_last_real_update.items()
+                if ts
+            },
+        }
+    )
 
 
 async def _depth_probe(conid):
@@ -4858,7 +4904,24 @@ async def h_ws(req):
                 if d.startswith("sbd+"):
                     parts = d.split("+", 3)
                     if len(parts) >= 3:
+                        account_id = parts[1]
                         conid = parts[2]
+                        log.info(
+                            "WS depth sub request: account=%s conid=%s ws=%s",
+                            account_id,
+                            conid,
+                            id(ws),
+                        )
+                        # Per-client safety: one WS client may track only one depth conid.
+                        for other_conid, clients in list(_depth_subs.items()):
+                            if other_conid == conid:
+                                continue
+                            if ws in clients:
+                                clients.discard(ws)
+                                if not clients:
+                                    _depth_subs.pop(other_conid, None)
+                                    _sched(_unsub_depth(other_conid))
+
                         _depth_subs.setdefault(conid, set()).add(ws)
                         _sched(_sub_depth(conid))
                         # Send last-known book snapshot immediately
@@ -4888,18 +4951,29 @@ async def h_ws(req):
                                     _send_to_ws(ws, snap)
                                 except Exception:
                                     pass
+                    else:
+                        log.warning("Malformed WS depth sub message: %s", d)
                     continue
 
                 # ubd+{accountId}+{conid}
                 if d.startswith("ubd+"):
                     parts = d.split("+", 3)
                     if len(parts) >= 3:
+                        account_id = parts[1]
                         conid = parts[2]
+                        log.info(
+                            "WS depth unsub request: account=%s conid=%s ws=%s",
+                            account_id,
+                            conid,
+                            id(ws),
+                        )
                         s = _depth_subs.get(conid, set())
                         s.discard(ws)
                         if not s:
                             _depth_subs.pop(conid, None)
                             _sched(_unsub_depth(conid))
+                    else:
+                        log.warning("Malformed WS depth unsub message: %s", d)
                     continue
 
             elif msg.type == web.WSMsgType.ERROR:
@@ -5353,6 +5427,7 @@ def create_app():
     app.router.add_get("/v1/api/iserver/marketdata/snapshot", h_snapshot)
     app.router.add_get("/v1/api/iserver/marketdata/depth", h_depth_snapshot)
     app.router.add_get("/v1/api/debug/depth-probe", h_depth_probe)
+    app.router.add_get("/v1/api/debug/depth-state", h_depth_state)
     app.router.add_get("/v1/api/debug/tick-bar-compare", h_debug_tick_bar_compare)
     app.router.add_get("/v1/api/iserver/marketdata/history", h_history)
     app.router.add_post("/v1/api/iserver/secdef/search", h_search)
