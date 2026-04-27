@@ -1,0 +1,9 @@
+{
+  "summary": "Chart interaction and packaging fixes with cleaner release publish logs.",
+  "release_notes": [
+    "Fixed chart auto-follow so candle tracking pauses only during actual drag/crosshair movement and resumes normally after interaction.",
+    "Unified live price display across chart windows for the same symbol so stale candles no longer show different prices per timeframe.",
+    "Added release-notes.html to the bundled app data so the Release Notes page no longer returns 404 in packaged builds.",
+    "Fixed publish log commit range and truncation handling for more reliable release output."
+  ]
+}

@@ -63,7 +63,7 @@ def run(cmd, cwd=None, check=True):
 
 
 def get_private_commit():
-    r = run(["git", "rev-parse", "--short", "HEAD"], cwd=SCRIPT_DIR)
+    r = run(["git", "rev-parse", "HEAD"], cwd=SCRIPT_DIR)
     return r.stdout.strip()
 
 
@@ -76,7 +76,31 @@ def _truncate_subject(subject, max_len=50):
     s = (subject or "").strip()
     if len(s) <= max_len:
         return s
-    return s[:max_len] + "(...)"
+    if max_len <= 3:
+        return s[:max_len]
+    return s[: max_len - 3] + "..."
+
+
+def _resolve_commit_ref(ref):
+    """Resolve a commit ref/hash (short or full) to a full commit hash."""
+    ref = (ref or "").strip()
+    if not ref:
+        return ""
+
+    # Fast path for valid refs/unique hashes.
+    r = run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=SCRIPT_DIR, check=False)
+    if r.returncode == 0:
+        return r.stdout.strip()
+
+    # Fallback: try prefix match over all commits to disambiguate historical short hashes.
+    all_commits = run(["git", "rev-list", "--all"], cwd=SCRIPT_DIR, check=False)
+    if all_commits.returncode != 0:
+        return ""
+
+    matches = [h.strip() for h in all_commits.stdout.splitlines() if h.strip().startswith(ref)]
+    if len(matches) == 1:
+        return matches[0]
+    return ""
 
 
 def _last_published_commit_from_log(repo):
@@ -103,9 +127,14 @@ def _last_published_commit_from_log(repo):
 def _commit_subjects_since(last_commit, current_commit):
     """Return commit subjects in private repo from last_commit..current_commit."""
     try:
-        if last_commit:
+        current_resolved = _resolve_commit_ref(current_commit)
+        if not current_resolved:
+            return []
+
+        last_resolved = _resolve_commit_ref(last_commit) if last_commit else ""
+        if last_resolved and last_resolved != current_resolved:
             r = run(
-                ["git", "log", "--pretty=%s", f"{last_commit}..{current_commit}"],
+                ["git", "log", "--pretty=%s", f"{last_resolved}..{current_resolved}"],
                 cwd=SCRIPT_DIR,
                 check=False,
             )
@@ -116,7 +145,7 @@ def _commit_subjects_since(last_commit, current_commit):
                 if subjects:
                     return subjects
         r = run(
-            ["git", "log", "-n", "1", "--pretty=%s", current_commit], cwd=SCRIPT_DIR
+            ["git", "log", "-n", "1", "--pretty=%s", current_resolved], cwd=SCRIPT_DIR
         )
         one = r.stdout.strip()
         return [one] if one else []

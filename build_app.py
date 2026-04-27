@@ -37,6 +37,7 @@ DATA_FILES = [
     "index.html",
     "analytics.html",
     "help.html",
+    "release-notes.html",
     "serve.py",
     "trades.json",
     "blitz_trade.ico",
