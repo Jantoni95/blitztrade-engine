@@ -4,6 +4,15 @@ History of source publications from the BlitzTrade private repository.
 
 ---
 
+### v2.7.5 — 2026-04-28 18:01 UTC
+
+- **Source commit:** `62c90bc25d579144ed30290eebe6f6e2ad87af6e` (private repo)
+- **Notes:** Release v2.7.5
+- **Included commits:**
+  - release: v2.7.5
+
+---
+
 ### v2.7.4 — 2026-04-27 17:12 UTC
 
 - **Source commit:** `123d79c617f3deb35c43fcbcce418b2019a5cbc9` (private repo)
