@@ -1,0 +1,20 @@
+{
+  "summary": "Stability overhaul — fixed connection issues, news loading, and Windows performance.",
+  "release_notes": [
+    "Fixed WebSocket reconnect spiral that caused subscribe/unsubscribe flooding after TWS reconnects.",
+    "Disconnected overlay only shows when gateway is truly unreachable (10s interval, 5 consecutive failures).",
+    "Simplified L2 depth to one subscription at a time — no more retry loops or heartbeat re-subscribes.",
+    "Fixed Time & Sales going silent after heavy activity.",
+    "Rate-limited NT checks to stop them from blocking real order requests.",
+    "Charts stay live when app window is unfocused or backgrounded (Windows).",
+    "Time & Sales now shows all legitimate trade prints (unreported ticks no longer filtered).",
+    "Fixed news panel loading forever due to duplicate fetch abort race on startup.",
+    "News and company info now deferred 3s so charts and scanners load first.",
+    "Fixed 30+ second Yahoo Finance delays on Windows caused by IPv6 timeout fallback.",
+    "Isolated slow external calls (Yahoo, Google News) in dedicated thread pool — can never block charts or scanners.",
+    "Yahoo crumb acquisition hardened with thread lock and proper cookie flow.",
+    "KPI/company info skeletons now clear properly when data is unavailable instead of loading forever.",
+    "Auth gate bypassed automatically in dev mode when Cognito is not configured.",
+    "Ctrl+C now force-exits on second press when graceful shutdown hangs."
+  ]
+}

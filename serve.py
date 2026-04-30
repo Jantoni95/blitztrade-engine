@@ -28,6 +28,13 @@ import threading
 import traceback
 import urllib.request
 import urllib.error
+import socket
+
+# Force IPv4 for urllib — prevents 30s IPv6 timeout on Windows
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _ipv4_getaddrinfo
 import http.cookiejar
 import xml.etree.ElementTree as ET
 from datetime import datetime, date, timedelta, timezone
@@ -655,6 +662,11 @@ def _sched(coro):
     return asyncio.run_coroutine_threadsafe(coro, ib_loop)
 
 
+async def _ib_fundamental(contract, report_type):
+    """Wrapper to turn reqFundamentalDataAsync (returns Future) into a coroutine."""
+    return await ib.reqFundamentalDataAsync(contract, report_type)
+
+
 async def _await_ib(coro, timeout=15):
     """Schedule coro on the IB loop and await it without blocking aiohttp."""
     if not ib_connected:
@@ -1100,11 +1112,21 @@ async def _unsub_barlive(conid, tf):
             pass
 
 
+_tbt_last_len: dict = {}  # conid -> (len, last_tick_time) at last broadcast (dedup guard)
+
+
 def _on_tbt_update(ticker, conid):
     """Callback for tick-by-tick Last — each call = one real trade print."""
     ticks = ticker.tickByTicks
     if not ticks:
         return
+    # updateEvent fires for ANY ticker change; skip if no new tick was appended
+    tick = ticks[-1]
+    cur_key = (len(ticks), getattr(tick, "time", None))
+    prev_key = _tbt_last_len.get(conid)
+    if cur_key == prev_key:
+        return
+    _tbt_last_len[conid] = cur_key
     tick = ticks[-1]
     # Filter out anomalous/non-standard prints for chart consistency.
     tick_attrib = getattr(tick, "tickAttribLast", None)
@@ -1120,8 +1142,8 @@ def _on_tbt_update(ticker, conid):
     size = getattr(tick, "size", 0) or 0
     if size <= 0:
         return
-    filtered = past_limit or unreported
-    if filtered and _VOLUME_MODE != "tbt":
+    # Only filter pastLimit (spike risk); unreported ticks are often legitimate prints
+    if past_limit and _VOLUME_MODE != "tbt":
         return
 
     msg = {
@@ -1142,7 +1164,7 @@ def _on_tbt_update(ticker, conid):
                 msg["_tbtTs"] = int(float(str(tick_time)))
         except Exception:
             pass
-    if not filtered:
+    if not past_limit:
         if not hasattr(tick, "price") or tick.price is None:
             return
         msg["31"] = str(tick.price)
@@ -1160,7 +1182,7 @@ _depth_pending: dict = {}  # conid -> asyncio.TimerHandle (debounce)
 _depth_seq: dict = {}  # conid -> monotonically increasing depth sequence
 _depth_last_real_update: dict = {}  # conid -> time.monotonic() of last TWS callback
 _DEPTH_DEBOUNCE = 0.05  # 50 ms — merges rapid per-row TWS callbacks
-_DEPTH_STALE_SECS = 30  # re-subscribe if no real update for this long
+_DEPTH_STALE_SECS = 120  # re-subscribe if no real update for this long
 
 
 def _on_depth_update(ticker, conid):
@@ -1372,6 +1394,7 @@ async def _sub_tbt(conid, contract=None):
 
 async def _unsub_tbt(conid):
     t = _conid_to_tbt_ticker.pop(conid, None)
+    _tbt_last_len.pop(conid, None)
     if t and t.contract:
         ib.cancelTickByTickData(t.contract, "Last")
 
@@ -1390,12 +1413,15 @@ async def _sub_depth(conid, force=False):
         old = _conid_to_depth_ticker.pop(conid, None)
         if old and old.contract:
             try:
-                ib.cancelMktDepth(old.contract)
+                ib.cancelMktDepth(old.contract, isSmartDepth=True)
             except Exception:
                 pass
         contract = await _resolve_contract(conid)
         if not contract:
             return
+        # Ensure exchange is set — IB requires it for reqMktDepth
+        if not contract.exchange:
+            contract.exchange = "SMART"
         t = ib.reqMktDepth(contract, numRows=20, isSmartDepth=True)
         # Replace domBids/domAsks with auto-expanding lists to prevent index errors
         t.domBids = _AutoExpandList(t.domBids)
@@ -1431,7 +1457,7 @@ async def _unsub_depth(conid):
     if not t:
         return
     if t.contract:
-        ib.cancelMktDepth(t.contract)
+        ib.cancelMktDepth(t.contract, isSmartDepth=True)
     log.info(f"Depth unsubscribed: {conid}")
 
 
@@ -1617,7 +1643,7 @@ async def _depth_probe(conid):
         finally:
             if t and t.contract:
                 try:
-                    ib.cancelMktDepth(t.contract)
+                    ib.cancelMktDepth(t.contract, isSmartDepth=True)
                 except Exception:
                     pass
         out["modes"].append(rec)
@@ -1919,7 +1945,7 @@ def _agg_ticks_to_bars(ticks, interval_sec=10):
             size = float(sz)
         except Exception:
             continue
-        if past_limit or unreported:
+        if past_limit:
             continue
         if size <= 0 or price <= 0:
             continue
@@ -2686,10 +2712,13 @@ def _import_csv_trades(text):
 
 # ── Tradability check (whatIf order) ──────────────────────────
 _tradable_cache: dict = {}  # conid -> bool (True=tradable, False=NT)
+_tradable_last_check: float = 0  # monotonic time of last batch check
+_TRADABLE_MIN_INTERVAL = 30  # seconds between batches
 
 
 async def h_check_tradable(req):
     """POST /check-tradable  body: {conids: [123, 456, ...]}"""
+    global _tradable_last_check
     body = await req.json()
     cids = body.get("conids", [])
     if not cids:
@@ -2704,11 +2733,20 @@ async def h_check_tradable(req):
         else:
             need.append(cid_str)
     if need:
-        try:
-            checked = await _await_ib(_check_tradable_batch(need), timeout=20)
-            result.update(checked)
-        except Exception as e:
-            log.warning(f"Tradability check failed: {e}")
+        now = time.monotonic()
+        if now - _tradable_last_check < _TRADABLE_MIN_INTERVAL:
+            # Rate limited — assume tradable for now, will check next time
+            for cid in need:
+                result[cid] = True
+        else:
+            _tradable_last_check = now
+            # Limit batch size to 3 to avoid blocking IB loop
+            batch = need[:3]
+            try:
+                checked = await _await_ib(_check_tradable_batch(batch), timeout=20)
+                result.update(checked)
+            except Exception as e:
+                log.warning(f"Tradability check failed: {e}")
     return web.json_response(result)
 
 
@@ -2735,9 +2773,9 @@ async def _check_tradable_batch(cids):
             order = LimitOrder("BUY", 1, 0.01)
             order.whatIf = True
             trade = ib.placeOrder(contract_copy, order)
-            # Wait briefly for response
-            for _ in range(8):
-                await asyncio.sleep(0.25)
+            # Wait briefly for response — keep short to not block IB loop
+            for _ in range(4):
+                await asyncio.sleep(0.15)
                 if trade.orderStatus.status:
                     break
             status = trade.orderStatus.status if trade.orderStatus else ""
@@ -3758,7 +3796,7 @@ async def h_float(req):
             }
         )
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _fetch_float_yf, [ticker])
+    result = await loop.run_in_executor(_slow_executor, _fetch_float_yf, [ticker])
     r = result.get(ticker, {})
     return web.json_response(
         {"ticker": ticker, "float": r.get("float"), "country": r.get("country")}
@@ -3794,7 +3832,7 @@ async def h_floats_batch(req):
             need.append(t)
     if need:
         loop = asyncio.get_event_loop()
-        fetched = await loop.run_in_executor(None, _fetch_float_yf, need)
+        fetched = await loop.run_in_executor(_slow_executor, _fetch_float_yf, need)
         result.update(fetched)
     return web.json_response(result)
 
@@ -3865,6 +3903,8 @@ _COUNTRY_ISO = {
 _yf_opener = None
 _yf_crumb = None
 _yf_crumb_ts = 0
+_yf_lock = threading.Lock()
+_slow_executor = None  # Separate thread pool for slow Yahoo/Google calls
 
 
 def _yf_ensure_crumb():
@@ -3872,33 +3912,50 @@ def _yf_ensure_crumb():
     global _yf_opener, _yf_crumb, _yf_crumb_ts
     if _yf_crumb and time.time() - _yf_crumb_ts < 3600:
         return True
-    _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    try:
-        import http.cookiejar
-
-        cj = http.cookiejar.CookieJar()
-        _yf_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-        # Hit fc.yahoo.com to get consent cookies (expect 404)
+    with _yf_lock:
+        # Double-check after acquiring lock
+        if _yf_crumb and time.time() - _yf_crumb_ts < 3600:
+            return True
+        _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         try:
-            _yf_opener.open(
-                urllib.request.Request(
-                    "https://fc.yahoo.com/", headers={"User-Agent": _UA}
-                ),
-                timeout=5,
+            import http.cookiejar
+
+            cj = http.cookiejar.CookieJar()
+            _yf_opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(cj),
+                urllib.request.HTTPRedirectHandler(),
             )
-        except Exception:
-            pass
-        # Fetch crumb
-        req = urllib.request.Request(
-            "https://query2.finance.yahoo.com/v1/test/getcrumb",
-            headers={"User-Agent": _UA},
-        )
-        _yf_crumb = _yf_opener.open(req, timeout=5).read().decode()
-        _yf_crumb_ts = time.time()
-        return bool(_yf_crumb)
-    except Exception as e:
-        log.warning("Yahoo crumb fetch failed: %s", e)
-        return False
+            _yf_opener.addheaders = [("User-Agent", _UA)]
+            # Hit fc.yahoo.com to seed consent cookies (expect 404 — that's fine)
+            try:
+                _yf_opener.open(
+                    urllib.request.Request(
+                        "https://fc.yahoo.com/", headers={"User-Agent": _UA}
+                    ),
+                    timeout=5,
+                )
+            except Exception:
+                pass  # 404 expected — cookies are still set
+            # Fetch crumb
+            req = urllib.request.Request(
+                "https://query2.finance.yahoo.com/v1/test/getcrumb",
+                headers={"User-Agent": _UA},
+            )
+            resp = _yf_opener.open(req, timeout=5)
+            if resp.status != 200:
+                log.warning("Yahoo crumb fetch returned %d", resp.status)
+                return False
+            _yf_crumb = resp.read().decode().strip()
+            if not _yf_crumb or "<" in _yf_crumb:
+                log.warning("Yahoo crumb invalid: %r", _yf_crumb[:50])
+                _yf_crumb = None
+                return False
+            _yf_crumb_ts = time.time()
+            log.info("Yahoo crumb acquired: %s...", _yf_crumb[:4])
+            return True
+        except Exception as e:
+            log.warning("Yahoo crumb fetch failed: %s", e)
+            return False
 
 
 def _fetch_float_urllib(tickers):
@@ -3914,7 +3971,7 @@ def _fetch_float_urllib(tickers):
         try:
             url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{t}?modules=defaultKeyStatistics,assetProfile&crumb={_yf_crumb}"
             req = urllib.request.Request(url, headers={"User-Agent": _UA})
-            with _yf_opener.open(req, timeout=10) as resp:
+            with _yf_opener.open(req, timeout=5) as resp:
                 data = json.loads(resp.read())
             qr = data.get("quoteSummary", {}).get("result", [])
             if qr:
@@ -3982,7 +4039,7 @@ async def _fetch_ib_kpis(ticker):
     # ── 1. ReportSnapshot for business summary, employees, sector ──
     try:
         xml_str = await _await_ib(
-            ib.reqFundamentalDataAsync(contract, "ReportSnapshot"), timeout=12
+            _ib_fundamental(contract, "ReportSnapshot"), timeout=12
         )
         if xml_str:
             root = ET.fromstring(xml_str)
@@ -4130,7 +4187,7 @@ async def _fetch_ib_kpis(ticker):
     loop = asyncio.get_event_loop()
     try:
         ydata = await asyncio.wait_for(
-            loop.run_in_executor(None, _fetch_yahoo_stdlib, ticker), timeout=15
+            loop.run_in_executor(_slow_executor, _fetch_yahoo_stdlib, ticker), timeout=8
         )
         if isinstance(ydata, dict):
             if ydata.get("summary") and not result["summary"]:
@@ -4165,8 +4222,20 @@ def _fetch_yahoo_stdlib(ticker):
         modules = "assetProfile,defaultKeyStatistics,financialData,summaryDetail,insiderHoldings"
         url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules={modules}&crumb={_yf_crumb}"
         req = urllib.request.Request(url, headers={"User-Agent": _UA})
-        with _yf_opener.open(req, timeout=10) as resp:
-            data = json.loads(resp.read())
+        resp = _yf_opener.open(req, timeout=5)
+        raw = resp.read()
+        data = json.loads(raw)
+    except urllib.error.HTTPError as e:
+        log.warning("Yahoo quoteSummary HTTP %d for %s (crumb=%s..)", e.code, ticker, (_yf_crumb or '')[:4])
+        # Invalidate crumb on 401 so next call refreshes it
+        if e.code == 401:
+            global _yf_crumb_ts
+            _yf_crumb_ts = 0
+        return result
+    except Exception as e:
+        log.warning("Yahoo quoteSummary failed for %s: %s", ticker, e)
+        return result
+    try:
         qr = data.get("quoteSummary", {}).get("result", [])
         if not qr:
             return result
@@ -4418,7 +4487,7 @@ def _fetch_yfinance_contract_info(ticker):
     try:
         url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=assetProfile,price&crumb={_yf_crumb}"
         req = urllib.request.Request(url, headers={"User-Agent": _UA})
-        with _yf_opener.open(req, timeout=10) as resp:
+        with _yf_opener.open(req, timeout=5) as resp:
             data = json.loads(resp.read())
         qr = data.get("quoteSummary", {}).get("result", [])
         if not qr:
@@ -4469,7 +4538,7 @@ async def h_contract_info(req):
         try:
             loop = asyncio.get_event_loop()
             info_task = _await_ib(_fetch_contract_info(ticker), timeout=12)
-            shelf_task = loop.run_in_executor(None, _check_shelf_sync, ticker)
+            shelf_task = loop.run_in_executor(_slow_executor, _check_shelf_sync, ticker)
             info, shelf = await asyncio.gather(
                 info_task, shelf_task, return_exceptions=True
             )
@@ -4485,8 +4554,8 @@ async def h_contract_info(req):
         try:
             loop = asyncio.get_event_loop()
             yf_info = await asyncio.wait_for(
-                loop.run_in_executor(None, _fetch_yfinance_contract_info, ticker),
-                timeout=15,
+                loop.run_in_executor(_slow_executor, _fetch_yfinance_contract_info, ticker),
+                timeout=8,
             )
             if yf_info:
                 info = yf_info
@@ -4522,8 +4591,8 @@ async def h_contract_kpis(req):
         try:
             loop = asyncio.get_event_loop()
             yf_data = await asyncio.wait_for(
-                loop.run_in_executor(None, _fetch_yahoo_stdlib, ticker),
-                timeout=15,
+                loop.run_in_executor(_slow_executor, _fetch_yahoo_stdlib, ticker),
+                timeout=8,
             )
             if isinstance(yf_data, dict):
                 if yf_data.get("summary"):
@@ -4627,10 +4696,10 @@ async def _fetch_google_news(ticker: str) -> list:
 
         def _do_fetch():
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=6) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 return resp.read()
 
-        data = await loop.run_in_executor(None, _do_fetch)
+        data = await asyncio.wait_for(loop.run_in_executor(_slow_executor, _do_fetch), timeout=6)
         root = ET.fromstring(data)
         items = []
         for item in root.iter("item"):
@@ -4666,10 +4735,11 @@ async def h_news(req):
     ticker = req.match_info.get("ticker", "").upper().strip()
     if not re.match(r"^[A-Z0-9.]{1,10}$", ticker):
         return web.json_response([], status=400)
+    t0 = time.time()
     # Fetch TWS news and Google News in parallel
     tws_task = None
     if ib_connected:
-        tws_task = asyncio.ensure_future(_await_ib(_fetch_tws_news(ticker), timeout=10))
+        tws_task = asyncio.ensure_future(_await_ib(_fetch_tws_news(ticker), timeout=6))
     google_task = asyncio.ensure_future(_fetch_google_news(ticker))
     tws_items = []
     if tws_task:
@@ -4677,7 +4747,14 @@ async def h_news(req):
             tws_items = await tws_task
         except Exception as e:
             log.warning(f"TWS news failed for {ticker}: {e}")
-    google_items = await google_task
+    t1 = time.time()
+    google_items = []
+    try:
+        google_items = await asyncio.wait_for(google_task, timeout=max(0.5, 8 - (t1 - t0)))
+    except (asyncio.TimeoutError, Exception) as e:
+        log.warning(f"Google News timed out for {ticker}: {e}")
+    t2 = time.time()
+    log.debug(f"[NEWS] {ticker} tws={len(tws_items)} in {t1-t0:.1f}s, google={len(google_items)} in {t2-t1:.1f}s")
     # Merge: TWS first, then Google, deduplicate by title similarity
     seen_titles = set()
     merged = []
@@ -5292,55 +5369,8 @@ def create_app():
 
     app = web.Application(middlewares=[_activity_middleware])
 
-    async def _depth_heartbeat(app):
-        """Detect stale or missing depth subscriptions and refresh from TWS."""
-        while True:
-            await asyncio.sleep(2)
-            now = time.monotonic()
-            for conid, clients in list(_depth_subs.items()):
-                if not clients:
-                    continue
-                t = _conid_to_depth_ticker.get(conid)
-                is_halted = _halt_state.get(conid) is True
-                # Recover missing depth ticker while clients are still subscribed.
-                if not is_halted and not t:
-                    log.info(
-                        f"Depth missing for {conid} with active clients — subscribing"
-                    )
-                    try:
-                        await _await_ib(_sub_depth(conid, force=True), timeout=10)
-                        _depth_last_real_update[conid] = now
-                    except Exception as e:
-                        log.warning(f"Depth subscribe recovery failed for {conid}: {e}")
-                    continue
-                # Detect stale depth: no real TWS callback in _DEPTH_STALE_SECS
-                if not is_halted and t:
-                    last = _depth_last_real_update.get(conid, 0)
-                    if last and (now - last) > _DEPTH_STALE_SECS:
-                        log.info(
-                            f"Depth stale for {conid} ({now - last:.0f}s) — re-subscribing"
-                        )
-                        try:
-                            # IMPORTANT: depth subscriptions must run on IB loop.
-                            await _await_ib(_sub_depth(conid, force=True), timeout=10)
-                            _depth_last_real_update[conid] = (
-                                now  # reset to avoid rapid re-sub
-                            )
-                        except Exception as e:
-                            log.warning(f"Depth re-sub failed for {conid}: {e}")
-
-    async def _start_depth_heartbeat(app):
-        app["_depth_hb"] = asyncio.ensure_future(_depth_heartbeat(app))
-
-    async def _stop_depth_heartbeat(app):
-        app["_depth_hb"].cancel()
-        try:
-            await app["_depth_hb"]
-        except asyncio.CancelledError:
-            pass
-
-    app.on_startup.append(_start_depth_heartbeat)
-    app.on_cleanup.append(_stop_depth_heartbeat)
+    # Depth heartbeat removed — it caused infinite re-subscribe loops for
+    # illiquid tickers. The frontend is now responsible for one simple sub.
 
     # Load trade journal from disk
     _load_journal()
@@ -5446,6 +5476,23 @@ def main():
     app = create_app()
     _aio_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_aio_loop)
+    # Increase thread pool so Yahoo/Google HTTP calls don't queue behind each other
+    from concurrent.futures import ThreadPoolExecutor
+    _aio_loop.set_default_executor(ThreadPoolExecutor(max_workers=8))
+    # Separate low-priority executor for Yahoo/Google so they never block charts/scanners/floats
+    global _slow_executor
+    _slow_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="slow")
+
+    import signal
+    _sig_count = [0]
+    def _force_exit(sig, frame):
+        _sig_count[0] += 1
+        if _sig_count[0] >= 2:
+            log.info("Force exit")
+            os._exit(0)
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, _force_exit)
+
     try:
         web.run_app(
             app,
