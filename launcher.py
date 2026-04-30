@@ -1695,19 +1695,6 @@ def main():
         "storage_path": _app_data,
     }
     if platform.system() == "Windows":
-        # Keep JS timers and WS processing responsive when the window is unfocused
-        # so chart candles continue following live ticks.
-        wv2_flags = [
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-            "--disable-backgrounding-occluded-windows",
-        ]
-        existing_flags = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
-        for flag in wv2_flags:
-            if flag not in existing_flags:
-                existing_flags = (existing_flags + " " + flag).strip()
-        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = existing_flags
-
         start_kwargs["gui"] = "edgechromium"
         _prepare_windows_pythonnet()
         _prepare_windows_pywebview_shims()

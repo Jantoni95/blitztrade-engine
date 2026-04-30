@@ -1,9 +1,0 @@
-{
-  "summary": "Background tab and focus-loss improvements for live chart reliability.",
-  "release_notes": [
-    "Charts and WebSocket tick processing now stay responsive when the app window is unfocused or backgrounded: disabled WebView2 background timer throttling and renderer backgrounding on Windows.",
-    "Added visibility hooks so queued tick data drains immediately when the app is foregrounded, preventing stale candles after switching away and back.",
-    "Suppressed UI health-check false-alarms while the app is hidden so background-tab state no longer triggers spurious reconnect attempts.",
-    "Fixed depth subscription sync to avoid cancelling already-loaded chart conids mid-symbol-switch, resolving cases where a loaded ticker's Level 2 depth was dropped when the terminal switched to a new symbol."
-  ]
-}

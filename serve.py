@@ -289,7 +289,6 @@ _depth_subs: dict = {}  # conid -> set of WS clients
 _conid_to_contract: dict = {}
 _conid_to_md_ticker: dict = {}  # conid -> Ticker from reqMktData
 _conid_to_tbt_ticker: dict = {}  # conid -> Ticker from reqTickByTickData
-_tbt_tick_counts: dict = {}  # conid -> count of ticks received (diagnostic)
 _conid_to_hvol_bars: dict = (
     {}
 )  # conid -> BarDataList from reqHistoricalData(keepUpToDate=True)
@@ -1107,19 +1106,6 @@ def _on_tbt_update(ticker, conid):
     if not ticks:
         return
     tick = ticks[-1]
-    
-    # Increment tick counter for diagnostics
-    if conid not in _tbt_tick_counts:
-        _tbt_tick_counts[conid] = 0
-    _tbt_tick_counts[conid] += 1
-    
-    # Log first few ticks per symbol for diagnostics
-    if _tbt_tick_counts[conid] <= 3:
-        contract = _conid_to_tbt_ticker.get(conid)
-        symbol = contract.contract.symbol if contract and hasattr(contract, 'contract') else conid
-        tick_time = getattr(tick, "time", None)
-        log.info(f"TBT tick #{_tbt_tick_counts[conid]} for {symbol} (conid={conid}): price={getattr(tick, 'price', None)} size={getattr(tick, 'size', None)} time={tick_time}")
-    
     # Filter out anomalous/non-standard prints for chart consistency.
     tick_attrib = getattr(tick, "tickAttribLast", None)
     past_limit = getattr(tick, "pastLimit", False) or getattr(
@@ -1133,18 +1119,10 @@ def _on_tbt_update(ticker, conid):
     #   size == 0       -> condition-only markers (e.g. halted/unhalted)
     size = getattr(tick, "size", 0) or 0
     if size <= 0:
-        if _tbt_tick_counts[conid] <= 5:
-            log.debug(f"TBT tick FILTERED (size<=0): conid={conid} size={size}")
         return
-    # Only filter pastLimit ticks in hvol mode (extreme price outliers)
-    # Allow unreported ticks through - they're real trades, just non-standard
-    if past_limit and _VOLUME_MODE != "tbt":
-        if _tbt_tick_counts[conid] <= 5:
-            log.debug(f"TBT tick FILTERED (pastLimit={past_limit}): conid={conid} mode={_VOLUME_MODE}")
+    filtered = past_limit or unreported
+    if filtered and _VOLUME_MODE != "tbt":
         return
-    
-    # Mark tick as filtered only if pastLimit (for downstream handling)
-    filtered = past_limit
 
     msg = {
         "conid": int(conid),
@@ -1380,18 +1358,14 @@ async def _unsub_md(conid):
 
 async def _sub_tbt(conid, contract=None):
     if conid in _conid_to_tbt_ticker:
-        log.debug(f"TBT already subscribed: {conid}")
         return
     if not contract:
         contract = await _resolve_contract(conid)
     if not contract:
-        log.warning(f"TBT subscription FAILED — contract not resolved for conid {conid}")
         return
     # Use Last (not AllLast) so live prints align with historical TRADES bars.
-    log.info(f"TBT subscribing: {conid} ({contract.symbol}) exchange={contract.exchange} primaryExchange={contract.primaryExchange}")
     t = ib.reqTickByTickData(contract, tickType="Last")
     _conid_to_tbt_ticker[conid] = t
-    _tbt_tick_counts[conid] = 0
     t.updateEvent += lambda ticker, c=conid: _on_tbt_update(ticker, c)
     log.info(f"TBT subscribed: {conid} ({contract.symbol})")
 
@@ -1403,87 +1377,42 @@ async def _unsub_tbt(conid):
 
 
 _depth_sub_in_flight: set = set()  # conids currently being subscribed
-_depth_sub_lock = asyncio.Lock()  # serialize depth switching to avoid overlap races
-
-
-def _force_unsub_depth(conid):
-    """Hard-cancel a depth stream regardless of listener/in-flight state."""
-    conid = str(conid)
-    h = _depth_pending.pop(conid, None)
-    if h:
-        h.cancel()
-    _depth_last_real_update.pop(conid, None)
-    _depth_subs.pop(conid, None)
-    _depth_sub_in_flight.discard(conid)
-    t = _conid_to_depth_ticker.pop(conid, None)
-    if t and t.contract:
-        try:
-            ib.cancelMktDepth(t.contract)
-        except Exception:
-            pass
-
-
-async def _drop_other_depth_subs(active_conid):
-    """Keep exactly one active depth conid globally.
-
-    This is a hard safety net against TWS market-depth slot exhaustion.
-    """
-    active_conid = str(active_conid)
-
-    # Hard-cancel all other live depth subscriptions.
-    for other in list(_conid_to_depth_ticker.keys()):
-        if str(other) == active_conid:
-            continue
-        _force_unsub_depth(str(other))
-
-    # Also clear stale listener sets for non-active conids.
-    for other in list(_depth_subs.keys()):
-        if str(other) == active_conid:
-            continue
-        _depth_subs.pop(other, None)
 
 
 async def _sub_depth(conid, force=False):
-    conid = str(conid)
-    async with _depth_sub_lock:
-        if conid in _depth_sub_in_flight:
-            return  # already subscribing — skip duplicate
+    if conid in _depth_sub_in_flight:
+        return  # already subscribing — skip duplicate
+    if not force and conid in _conid_to_depth_ticker:
+        return  # already active
+    _depth_sub_in_flight.add(conid)
+    try:
+        # On forced refresh, cancel existing and re-subscribe to get a fresh book.
+        old = _conid_to_depth_ticker.pop(conid, None)
+        if old and old.contract:
+            try:
+                ib.cancelMktDepth(old.contract)
+            except Exception:
+                pass
+        contract = await _resolve_contract(conid)
+        if not contract:
+            return
+        t = ib.reqMktDepth(contract, numRows=20, isSmartDepth=True)
+        # Replace domBids/domAsks with auto-expanding lists to prevent index errors
+        t.domBids = _AutoExpandList(t.domBids)
+        t.domAsks = _AutoExpandList(t.domAsks)
+        _conid_to_depth_ticker[conid] = t
 
-        _depth_sub_in_flight.add(conid)
-        try:
-            # Hard cap: only keep depth for the active Trading Terminal conid.
-            await _drop_other_depth_subs(conid)
+        def _depth_cb(ticker, c=conid):
+            try:
+                _on_depth_update(ticker, c)
+            except Exception as e:
+                log.error(f"Depth callback error for {c}: {e}")
 
-            if not force and conid in _conid_to_depth_ticker:
-                return  # already active
-
-            # On forced refresh, cancel existing and re-subscribe to get a fresh book.
-            old = _conid_to_depth_ticker.pop(conid, None)
-            if old and old.contract:
-                try:
-                    ib.cancelMktDepth(old.contract)
-                except Exception:
-                    pass
-            contract = await _resolve_contract(conid)
-            if not contract:
-                return
-            t = ib.reqMktDepth(contract, numRows=20, isSmartDepth=True)
-            # Replace domBids/domAsks with auto-expanding lists to prevent index errors
-            t.domBids = _AutoExpandList(t.domBids)
-            t.domAsks = _AutoExpandList(t.domAsks)
-            _conid_to_depth_ticker[conid] = t
-
-            def _depth_cb(ticker, c=conid):
-                try:
-                    _on_depth_update(ticker, c)
-                except Exception as e:
-                    log.error(f"Depth callback error for {c}: {e}")
-
-            t.updateEvent += _depth_cb
-            _depth_last_real_update[conid] = time.monotonic()
-            log.info(f"Depth subscribed: {conid} force={force}")
-        finally:
-            _depth_sub_in_flight.discard(conid)
+        t.updateEvent += _depth_cb
+        _depth_last_real_update[conid] = time.monotonic()
+        log.info(f"Depth subscribed: {conid} force={force}")
+    finally:
+        _depth_sub_in_flight.discard(conid)
 
 
 async def _unsub_depth(conid):
@@ -1494,10 +1423,16 @@ async def _unsub_depth(conid):
     clients = _depth_subs.get(conid)
     if clients:
         return  # still has active listeners — keep the subscription
-    # Keep the current depth stream warm even without listeners.
-    # It is rotated only when a new conid subscribes via _drop_other_depth_subs.
-    if conid in _conid_to_depth_ticker:
+    h = _depth_pending.pop(conid, None)
+    if h:
+        h.cancel()
+    _depth_last_real_update.pop(conid, None)
+    t = _conid_to_depth_ticker.pop(conid, None)
+    if not t:
         return
+    if t.contract:
+        ib.cancelMktDepth(t.contract)
+    log.info(f"Depth unsubscribed: {conid}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1640,54 +1575,6 @@ async def h_depth_probe(req):
         log.error(f"Depth probe: {e}")
         return web.json_response({"error": str(e)}, status=500)
     return web.json_response(result)
-
-
-async def h_depth_state(req):
-    """Debug endpoint: inspect current depth subscription state."""
-    listeners = {
-        str(conid): len(clients or set())
-        for conid, clients in _depth_subs.items()
-    }
-    active = sorted(str(conid) for conid in _conid_to_depth_ticker.keys())
-    return web.json_response(
-        {
-            "listeners": listeners,
-            "activeConids": active,
-            "inFlight": sorted(str(c) for c in _depth_sub_in_flight),
-            "lastRealUpdateAgeSec": {
-                str(conid): round(time.monotonic() - ts, 2)
-                for conid, ts in _depth_last_real_update.items()
-                if ts
-            },
-        }
-    )
-
-
-async def h_tbt_state(req):
-    """Debug endpoint: inspect T&S (tick-by-tick) subscription state."""
-    md_listeners = {
-        str(conid): len(clients or set())
-        for conid, clients in _md_subs.items()
-    }
-    active_tbt = []
-    for conid, ticker in _conid_to_tbt_ticker.items():
-        symbol = ""
-        if ticker and hasattr(ticker, "contract") and ticker.contract:
-            symbol = getattr(ticker.contract, "symbol", "")
-        active_tbt.append({
-            "conid": str(conid),
-            "symbol": symbol,
-            "tickCount": _tbt_tick_counts.get(conid, 0),
-        })
-    active_tbt.sort(key=lambda x: x["tickCount"], reverse=True)
-    
-    return web.json_response(
-        {
-            "mdListeners": md_listeners,
-            "activeTbtSubscriptions": active_tbt,
-            "totalTbtTickers": len(_conid_to_tbt_ticker),
-        }
-    )
 
 
 async def _depth_probe(conid):
@@ -4971,24 +4858,7 @@ async def h_ws(req):
                 if d.startswith("sbd+"):
                     parts = d.split("+", 3)
                     if len(parts) >= 3:
-                        account_id = parts[1]
                         conid = parts[2]
-                        log.info(
-                            "WS depth sub request: account=%s conid=%s ws=%s",
-                            account_id,
-                            conid,
-                            id(ws),
-                        )
-                        # Per-client safety: one WS client may track only one depth conid.
-                        for other_conid, clients in list(_depth_subs.items()):
-                            if other_conid == conid:
-                                continue
-                            if ws in clients:
-                                clients.discard(ws)
-                                if not clients:
-                                    _depth_subs.pop(other_conid, None)
-                                    _sched(_unsub_depth(other_conid))
-
                         _depth_subs.setdefault(conid, set()).add(ws)
                         _sched(_sub_depth(conid))
                         # Send last-known book snapshot immediately
@@ -5018,29 +4888,18 @@ async def h_ws(req):
                                     _send_to_ws(ws, snap)
                                 except Exception:
                                     pass
-                    else:
-                        log.warning("Malformed WS depth sub message: %s", d)
                     continue
 
                 # ubd+{accountId}+{conid}
                 if d.startswith("ubd+"):
                     parts = d.split("+", 3)
                     if len(parts) >= 3:
-                        account_id = parts[1]
                         conid = parts[2]
-                        log.info(
-                            "WS depth unsub request: account=%s conid=%s ws=%s",
-                            account_id,
-                            conid,
-                            id(ws),
-                        )
                         s = _depth_subs.get(conid, set())
                         s.discard(ws)
                         if not s:
                             _depth_subs.pop(conid, None)
                             _sched(_unsub_depth(conid))
-                    else:
-                        log.warning("Malformed WS depth unsub message: %s", d)
                     continue
 
             elif msg.type == web.WSMsgType.ERROR:
@@ -5494,8 +5353,6 @@ def create_app():
     app.router.add_get("/v1/api/iserver/marketdata/snapshot", h_snapshot)
     app.router.add_get("/v1/api/iserver/marketdata/depth", h_depth_snapshot)
     app.router.add_get("/v1/api/debug/depth-probe", h_depth_probe)
-    app.router.add_get("/v1/api/debug/depth-state", h_depth_state)
-    app.router.add_get("/v1/api/debug/tbt-state", h_tbt_state)
     app.router.add_get("/v1/api/debug/tick-bar-compare", h_debug_tick_bar_compare)
     app.router.add_get("/v1/api/iserver/marketdata/history", h_history)
     app.router.add_post("/v1/api/iserver/secdef/search", h_search)

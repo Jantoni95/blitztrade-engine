@@ -1,9 +1,0 @@
-{
-  "summary": "Level 2 subscription reliability and debugging improvements for Trading Terminal depth visibility.",
-  "release_notes": [
-    "Improved Trading Terminal feed reattachment so opening the terminal on the same ticker re-subscribes Level 2 and live price streams more reliably.",
-    "Added defensive Level 2 resubscribe behavior on same-conid ticker prep to reduce stale depth state after popup reopen or reconnect.",
-    "Hardened backend depth handling to enforce a single active depth symbol and reduce TWS depth-slot conflicts.",
-    "Added depth diagnostics: websocket depth subscribe/unsubscribe logging and a new debug endpoint (/v1/api/debug/depth-state) to inspect active listeners and depth state."
-  ]
-}
