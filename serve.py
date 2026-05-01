@@ -30,9 +30,15 @@ import urllib.request
 import urllib.error
 import socket
 
-# Force IPv4 for urllib — prevents 30s IPv6 timeout on Windows
-_orig_getaddrinfo = socket.getaddrinfo
+# Force IPv4 for urllib — prevents 30s IPv6 timeout on Windows.
+# Skip the override for localhost/loopback so aiohttp server binding is unaffected.
+# Guard against importlib.reload() capturing the already-patched version.
+_orig_getaddrinfo = getattr(socket, '_true_getaddrinfo', socket.getaddrinfo)
+socket._true_getaddrinfo = _orig_getaddrinfo
+_LOOPBACK = frozenset(("localhost", "127.0.0.1", "0.0.0.0", "::1", "", None))
 def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host in _LOOPBACK:
+        return _orig_getaddrinfo(host, port, family, type, proto, flags)
     return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
 socket.getaddrinfo = _ipv4_getaddrinfo
 import http.cookiejar
@@ -321,8 +327,7 @@ _WD_DISCONNECT_RETRY_COOLDOWN_SECS: float = 3.0
 _SCANNER_MAX_CONCURRENT = 4
 _scanner_sem = asyncio.Semaphore(_SCANNER_MAX_CONCURRENT)
 
-# Frozen market data + depth cache for halts
-_depth_cache: dict = {}  # conid -> last non-empty depth rows list
+# Frozen market data for halts
 _frozen_conids: set = set()  # conids currently using frozen (type 2) market data
 
 # Float cache (from Finviz)
@@ -452,7 +457,7 @@ async def _ib_connect():
         for conid in list(_depth_subs.keys()):
             if _depth_subs[conid]:  # has active clients
                 try:
-                    await _sub_depth(conid)
+                    await _sub_depth(conid, force=True)
                 except Exception as e:
                     log.warning(f"Re-sub depth for {conid} failed: {e}")
         # Request account updates so positions/pnl/summary stay fresh
@@ -1181,19 +1186,25 @@ def _on_tbt_update(ticker, conid):
 _depth_pending: dict = {}  # conid -> asyncio.TimerHandle (debounce)
 _depth_seq: dict = {}  # conid -> monotonically increasing depth sequence
 _depth_last_real_update: dict = {}  # conid -> time.monotonic() of last TWS callback
-_DEPTH_DEBOUNCE = 0.05  # 50 ms — merges rapid per-row TWS callbacks
-_DEPTH_STALE_SECS = 120  # re-subscribe if no real update for this long
+_depth_last_json: dict = {}  # conid -> last broadcast rows string (dedup flicker)
+_depth_prev2_json: dict = {}  # conid -> second-to-last broadcast (oscillation detect)
+_depth_sub_time: dict = {}  # conid -> time.monotonic() when subscription started
+_DEPTH_DEBOUNCE = 0.10  # 100ms — enough to batch IB's per-row callbacks
+_DEPTH_WARMUP = 0.50  # 500ms — suppress initial stale snapshot from IB
 
 
 def _on_depth_update(ticker, conid):
-    """Callback for L2 depth updates (debounced)."""
+    """Callback for L2 depth updates — debounced to batch per-row IB callbacks."""
     _depth_last_real_update[conid] = time.monotonic()
-    # Cancel any previously scheduled flush for this conid
+    # During warmup window after subscribe, use longer debounce to let
+    # IB's initial burst settle before broadcasting (avoids stale snapshot).
+    sub_t = _depth_sub_time.get(conid, 0)
+    elapsed = time.monotonic() - sub_t
+    debounce = _DEPTH_WARMUP if elapsed < _DEPTH_WARMUP else _DEPTH_DEBOUNCE
+    # Cancel previous pending flush and reschedule
     h = _depth_pending.pop(conid, None)
     if h:
         h.cancel()
-    # Schedule a flush 50 ms from now — if another update arrives before
-    # that, this timer is replaced, so only the final book state is sent.
     loop = asyncio.get_event_loop()
     _depth_pending[conid] = loop.call_later(
         _DEPTH_DEBOUNCE, _flush_depth, ticker, conid
@@ -1201,11 +1212,25 @@ def _on_depth_update(ticker, conid):
 
 
 def _flush_depth(ticker, conid):
-    """Actually broadcast the depth snapshot after debounce."""
+    """Broadcast depth snapshot after debounce."""
     _depth_pending.pop(conid, None)
     clients = _depth_subs.get(conid)
     if not clients:
         return
+    # Build rows snapshot for dedup check (without seq/topic overhead)
+    rows_json = _build_depth_rows_json(ticker)
+    # Dedup: skip broadcast if book content is identical to last send.
+    # This prevents flicker when debounce fires repeatedly with the
+    # same state between IB's individual row callbacks.
+    if rows_json == _depth_last_json.get(conid):
+        return
+    prev = _depth_last_json.get(conid)
+    _depth_last_json[conid] = rows_json
+    # Detect flicker: if content oscillates (prev→new→prev pattern), log it
+    prev2 = _depth_prev2_json.get(conid)
+    _depth_prev2_json[conid] = prev
+    if prev2 and prev2 == rows_json and prev != rows_json:
+        log.warning(f"L2 flicker detected for {conid}: book oscillating between two states")
     seq = _depth_seq.get(conid, 0) + 1
     _depth_seq[conid] = seq
     data = _build_depth_msg(ticker, conid, seq)
@@ -1217,6 +1242,26 @@ def _flush_depth(ticker, conid):
             dead.append(ws)
     for ws in dead:
         clients.discard(ws)
+
+
+def _build_depth_rows_json(ticker):
+    """Build a compact string of bid/ask levels for dedup comparison."""
+    parts = []
+    for level in ticker.domBids or []:
+        if level is None or not level.price:
+            continue
+        sz = int(level.size) if level.size else 0
+        if sz <= 0:
+            continue
+        parts.append(f"B{level.price}:{sz}")
+    for level in ticker.domAsks or []:
+        if level is None or not level.price:
+            continue
+        sz = int(level.size) if level.size else 0
+        if sz <= 0:
+            continue
+        parts.append(f"A{level.price}:{sz}")
+    return "|".join(parts)
 
 
 def _build_depth_msg(ticker, conid, seq=None):
@@ -1296,37 +1341,12 @@ def _build_depth_msg(ticker, conid, seq=None):
     msg = {"topic": f"sbd+{ib_account}+{conid}", "data": rows}
     if seq is not None:
         msg["_seq"] = seq
-    # Cache non-empty depth for serving during halts (order book empties on halt)
-    if rows:
-        _depth_cache[conid] = rows
     return json.dumps(msg)
 
 
 def _broadcast_cached_depth(conid):
-    """Send cached (frozen) depth to all subscribers during a halt."""
-    clients = _depth_subs.get(conid)
-    if not clients:
-        return
-    cached = _depth_cache.get(conid)
-    if not cached:
-        return
-    seq = _depth_seq.get(conid, 0) + 1
-    _depth_seq[conid] = seq
-    msg = {
-        "topic": f"sbd+{ib_account}+{conid}",
-        "data": cached,
-        "_frozen": True,
-        "_seq": seq,
-    }
-    data = json.dumps(msg)
-    dead = []
-    for ws in clients:
-        try:
-            _send_to_ws(ws, data)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        clients.discard(ws)
+    """No-op — depth is never cached, always live only."""
+    return
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1400,10 +1420,11 @@ async def _unsub_tbt(conid):
 
 
 _depth_sub_in_flight: set = set()  # conids currently being subscribed
+_depth_callbacks: dict = {}  # conid -> current _depth_cb function (for disconnect)
 
 
 async def _sub_depth(conid, force=False):
-    if conid in _depth_sub_in_flight:
+    if not force and conid in _depth_sub_in_flight:
         return  # already subscribing — skip duplicate
     if not force and conid in _conid_to_depth_ticker:
         return  # already active
@@ -1412,6 +1433,13 @@ async def _sub_depth(conid, force=False):
         # On forced refresh, cancel existing and re-subscribe to get a fresh book.
         old = _conid_to_depth_ticker.pop(conid, None)
         if old and old.contract:
+            # Disconnect the old callback FIRST so stale events can't fire
+            old_cb = _depth_callbacks.pop(conid, None)
+            if old_cb:
+                try:
+                    old.updateEvent -= old_cb
+                except Exception:
+                    pass
             try:
                 ib.cancelMktDepth(old.contract, isSmartDepth=True)
             except Exception:
@@ -1423,18 +1451,25 @@ async def _sub_depth(conid, force=False):
         if not contract.exchange:
             contract.exchange = "SMART"
         t = ib.reqMktDepth(contract, numRows=20, isSmartDepth=True)
-        # Replace domBids/domAsks with auto-expanding lists to prevent index errors
-        t.domBids = _AutoExpandList(t.domBids)
-        t.domAsks = _AutoExpandList(t.domAsks)
+        # Replace domBids/domAsks with fresh auto-expanding lists to prevent
+        # stale entries from the previous subscription leaking through.
+        t.domBids = _AutoExpandList()
+        t.domAsks = _AutoExpandList()
         _conid_to_depth_ticker[conid] = t
+        _depth_sub_time[conid] = time.monotonic()
+        _depth_last_json.pop(conid, None)  # clear dedup so first real flush goes through
 
         def _depth_cb(ticker, c=conid):
+            # Guard: only accept events from the CURRENT ticker for this conid
+            if _conid_to_depth_ticker.get(c) is not ticker:
+                return
             try:
                 _on_depth_update(ticker, c)
             except Exception as e:
                 log.error(f"Depth callback error for {c}: {e}")
 
         t.updateEvent += _depth_cb
+        _depth_callbacks[conid] = _depth_cb
         _depth_last_real_update[conid] = time.monotonic()
         log.info(f"Depth subscribed: {conid} force={force}")
     finally:
@@ -1453,9 +1488,17 @@ async def _unsub_depth(conid):
     if h:
         h.cancel()
     _depth_last_real_update.pop(conid, None)
+    _depth_last_json.pop(conid, None)
     t = _conid_to_depth_ticker.pop(conid, None)
     if not t:
         return
+    # Disconnect callback before cancelling to prevent stale events
+    old_cb = _depth_callbacks.pop(conid, None)
+    if old_cb:
+        try:
+            t.updateEvent -= old_cb
+        except Exception:
+            pass
     if t.contract:
         ib.cancelMktDepth(t.contract, isSmartDepth=True)
     log.info(f"Depth unsubscribed: {conid}")
@@ -1584,9 +1627,6 @@ async def h_depth_snapshot(req):
         # Reuse _build_depth_msg logic (sort, cap, cross-filter)
         msg = json.loads(_build_depth_msg(t, conid))
         rows = msg.get("data", [])
-    # During halts or if live book is empty, fall back to cached depth
-    if not rows and conid in _depth_cache:
-        rows = _depth_cache[conid]
     return web.json_response(rows)
 
 
@@ -2742,11 +2782,11 @@ async def h_check_tradable(req):
             _tradable_last_check = now
             # Limit batch size to 3 to avoid blocking IB loop
             batch = need[:3]
-            try:
-                checked = await _await_ib(_check_tradable_batch(batch), timeout=20)
-                result.update(checked)
-            except Exception as e:
-                log.warning(f"Tradability check failed: {e}")
+            # Fire-and-forget: don't block the response waiting for whatIf orders.
+            # Results will be cached for next poll cycle.
+            _sched(_check_tradable_batch(batch))
+            for cid in need:
+                result[cid] = True  # assume tradable until confirmed otherwise
     return web.json_response(result)
 
 
@@ -4937,34 +4977,9 @@ async def h_ws(req):
                     if len(parts) >= 3:
                         conid = parts[2]
                         _depth_subs.setdefault(conid, set()).add(ws)
-                        _sched(_sub_depth(conid))
-                        # Send last-known book snapshot immediately
-                        is_halted = _halt_state.get(conid) is True
-                        t = _conid_to_depth_ticker.get(conid)
-                        if is_halted and conid in _depth_cache:
-                            # During halt, send cached depth with frozen flag
-                            try:
-                                snap = json.dumps(
-                                    {
-                                        "topic": f"sbd+{ib_account}+{conid}",
-                                        "data": _depth_cache[conid],
-                                        "_frozen": True,
-                                    }
-                                )
-                                _send_to_ws(ws, snap)
-                            except Exception:
-                                pass
-                        elif t:
-                            # Only send snapshot if data is fresh (< 2s) to avoid stale flash
-                            last_upd = _depth_last_real_update.get(conid, 0)
-                            if time.monotonic() - last_upd < 2.0:
-                                try:
-                                    seq = _depth_seq.get(conid, 0) + 1
-                                    _depth_seq[conid] = seq
-                                    snap = _build_depth_msg(t, conid, seq)
-                                    _send_to_ws(ws, snap)
-                                except Exception:
-                                    pass
+                        # Don't force if already active — prevents cancel+resub
+                        # flicker on duplicate sbd+ (reconnect, ticker re-open).
+                        _sched(_sub_depth(conid, force=False))
                     continue
 
                 # ubd+{accountId}+{conid}
@@ -5491,7 +5506,8 @@ def main():
             log.info("Force exit")
             os._exit(0)
         raise KeyboardInterrupt
-    signal.signal(signal.SIGINT, _force_exit)
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, _force_exit)
 
     try:
         web.run_app(

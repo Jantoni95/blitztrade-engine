@@ -1,0 +1,12 @@
+{
+  "summary": "Stability fixes — startup issues, smoother charts, and less noise.",
+  "release_notes": [
+    "Fixed app crash and connection preference not applying on startup (Windows).",
+    "Fixed L2 depth flickering and stale prices when switching tickers.",
+    "Fixed chart not auto-scrolling with new candles and showing flat bars when market is quiet.",
+    "Chart and Time & Sales now show 'No live data available' when no market data is streaming.",
+    "Fixed 'Orders request timed out' error appearing on startup.",
+    "Fixed hotkey grid disappearing when trading terminal is docked on fresh start.",
+    "Alert sounds now play once per scan instead of repeating for every new item."
+  ]
+}

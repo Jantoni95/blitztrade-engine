@@ -1559,6 +1559,10 @@ def _start_server(port, tws_port=None):
         serve.STATIC_DIR = Path(BASE_DIR)
         serve.PORT = port
 
+        # Forward saved connection mode so it tries the right ports on startup
+        prefs = _load_startup_prefs()
+        serve._connection_mode_preference = prefs.get("connMode", "gateway")
+
         start_time = time.time()
         try:
             _log("server_main_enter")
